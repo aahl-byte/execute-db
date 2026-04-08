@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "explore-db"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "psycopg2-binary>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+explore-db = "explore_db.cli:main"
