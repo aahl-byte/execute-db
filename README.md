@@ -9,13 +9,13 @@ Connections are enforced as read-only via `default_transaction_read_only=on`, so
 Requires Python 3.9+.
 
 ```bash
-pip install .
+pip install git+https://github.com/aahl-byte/explore-db
 ```
 
 Or for development:
 
 ```bash
-pip install -e .
+git clone https://github.com/aahl-byte/explore-db.git && pip install -e explore-db
 ```
 
 ## Setup
