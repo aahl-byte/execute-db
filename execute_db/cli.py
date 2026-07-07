@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -17,9 +18,40 @@ from dotenv import dotenv_values
 
 from . import crypto, kernel_keyring
 
-CONFIG_DIR = Path.home() / ".execute-db"
+# --- privilege separation (system mode) ---------------------------------------
+# When installed hardened, secrets live under a dedicated service user and the
+# CLI runs as that user via sudo. See install.sh and the README.
+SERVICE_USER = "executedb"
+LAUNCHER = "/usr/local/bin/execute-db"
+MAX_SYSTEM_TTL_SECONDS = 24 * 3600  # cap on --ttl in system mode
+
+
+def service_uid():
+    try:
+        return pwd.getpwnam(SERVICE_USER).pw_uid
+    except KeyError:
+        return None
+
+
+def in_system_mode() -> bool:
+    """True when this process IS the service user (i.e. invoked via the sudo rule)."""
+    uid = service_uid()
+    return uid is not None and os.geteuid() == uid
+
+
+def _resolve_config_dir() -> Path:
+    # In system mode derive the home from the running uid's passwd entry, NOT
+    # from $HOME: an attacker who calls the sudo rule directly without -H could
+    # otherwise point CONFIG_DIR (and thus config.json) at a dir they control.
+    if in_system_mode():
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".execute-db"
+    return Path.home() / ".execute-db"
+
+
+CONFIG_DIR = _resolve_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 EPHEMERAL_DIR = CONFIG_DIR / ".ephemeral"
+SYSTEM_MARKER = Path.home() / ".execute-db" / "SYSTEM"  # redirect hint (user side)
 
 DEFAULT_ENVIRONMENTS = ["dev", "staging", "production"]
 
@@ -78,10 +110,20 @@ def env_file_path(config: dict, env: str):
     return CONFIG_DIR / entry
 
 
+def require_encrypted(env: str):
+    """In system mode, a plaintext env would let any agent with the sudo rule
+    read/mint credentials with no password gate. Refuse it."""
+    if in_system_mode():
+        fail(f"Environment '{env}' is not password protected; hardened (system) "
+             f"mode requires encrypted environments. Encrypt it first with "
+             f"`execute-db password set --{env}`.")
+
+
 def read_env_text(env: str, env_path: Path) -> str:
     """Read an env file's contents, decrypting (interactively) if encrypted."""
     data = env_path.read_bytes()
     if not crypto.is_encrypted(env_path):
+        require_encrypted(env)
         return data.decode()
 
     try:
@@ -113,6 +155,7 @@ def load_database_url(config: dict, env: str) -> str:
 
     # Support direct URL string or .env filename
     if env_path is None:
+        require_encrypted(env)  # direct URLs have no password gate
         return config[env]
 
     if not env_path.exists():
@@ -179,7 +222,16 @@ def parse_ttl(text: str) -> int:
     m = TTL_RE.match(text)
     if not m:
         fail(f"Invalid --ttl {text!r} (use e.g. 45s, 30m, 2h, 1d)")
-    return int(m.group(1)) * TTL_UNITS[m.group(2)]
+    seconds = int(m.group(1)) * TTL_UNITS[m.group(2)]
+    if seconds <= 0:
+        fail(f"Invalid --ttl {text!r}: must be greater than zero")
+    if in_system_mode() and seconds > MAX_SYSTEM_TTL_SECONDS:
+        fail(f"--ttl {text!r} exceeds the {MAX_SYSTEM_TTL_SECONDS // 3600}h maximum "
+             f"in hardened (system) mode")
+    return seconds
+
+
+TOKEN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def token_id(token: str) -> str:
@@ -187,6 +239,11 @@ def token_id(token: str) -> str:
 
 
 def token_path(tid: str) -> Path:
+    # tids are always derived from sha256 hexdigests; validate before building a
+    # path so a user-supplied id (e.g. `token revoke ../../.env.production`)
+    # cannot escape the ephemeral dir and wipe an arbitrary file.
+    if not TOKEN_ID_RE.match(tid):
+        fail(f"Invalid token id {tid!r}")
     return EPHEMERAL_DIR / f".env.{tid}"
 
 
@@ -204,6 +261,7 @@ def cmd_token_create(config: dict, env: str, ttl: str):
     # Decrypt (or read) the source env; this is where the password gate applies.
     path = env_file_path(config, env)
     if path is None:
+        require_encrypted(env)  # direct URLs have no password gate
         text = f"DATABASE_URL={config[env]}\n"
     else:
         if not path.exists():
@@ -290,6 +348,10 @@ def schedule_token_wipe(ttl_seconds: int) -> bool:
     token. Transient timers do not survive a reboot; install_boot_sweep()
     covers that gap.
     """
+    # System mode has no user session/bus; the installed system timer sweeps
+    # instead. Attempting `systemd-run --user` here just fails noisily.
+    if in_system_mode():
+        return False
     exe = cli_binary()
     if not exe or not shutil.which("systemd-run"):
         return False
@@ -314,6 +376,8 @@ def install_boot_sweep():
     Written once; failures are silent (schedule_token_wipe reports the
     user-visible outcome).
     """
+    if in_system_mode():  # the installed system timer covers this
+        return
     exe = cli_binary()
     if not exe or not shutil.which("systemctl"):
         return
@@ -636,6 +700,12 @@ def exec_main():
         database_url = load_database_url(config, env)
 
     if args.file:
+        # The trusted launcher converts -f into piped stdin *as the calling
+        # user*; if -f still reaches the service-user process, it would open the
+        # path as the service user (a file-read primitive). Refuse it here.
+        if in_system_mode():
+            fail("-f/--file is not available in hardened (system) mode; "
+                 "pipe the SQL via stdin instead")
         sql = Path(args.file).read_text()
     elif args.sql:
         sql = args.sql
@@ -647,11 +717,33 @@ def exec_main():
     try:
         run_query(database_url, sql)
     except Exception as e:
+        # In system mode the agent sees this over sudo; psycopg2 errors can echo
+        # host/user/dbname. Keep the detail for interactive user-mode debugging.
+        if in_system_mode():
+            fail("Query failed")
         print(f"Query failed: {e}", file=sys.stderr)
         sys.exit(1)
 
 
+def maybe_redirect_to_launcher():
+    """Convenience redirect into the hardened launcher when the store has been
+    migrated to system mode. UX only — NOT a security boundary: the marker
+    lives in a user-writable dir and PATH can be shadowed, so real protection
+    depends on the human invoking the trusted absolute path. See the README.
+    """
+    if in_system_mode() or os.environ.get("EXECUTE_DB_NO_SYSTEM"):
+        return
+    try:
+        has_marker = SYSTEM_MARKER.exists()
+    except OSError:
+        has_marker = False
+    if has_marker and os.path.exists(LAUNCHER):
+        os.execv(LAUNCHER, [LAUNCHER, *sys.argv[1:]])
+
+
 def main():
+    maybe_redirect_to_launcher()
+
     # Backstop: the systemd timers do the wall-clock wiping, but sweep here too
     # in case they were unavailable. Skip for `token` commands, which sweep for
     # themselves (verbosely). Never let this break the actual command.
