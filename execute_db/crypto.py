@@ -120,15 +120,41 @@ def _tty_available() -> bool:
         return False
 
 
-def prompt_secret_line(prompt: str) -> str:
-    """Read a single non-empty secret line from the terminal (no echo).
+# Bracketed-paste markers a terminal wraps around pasted text. We never enable
+# bracketed paste, but some terminals/multiplexers leave it on globally, which
+# would otherwise corrupt a pasted value; strip them defensively.
+_PASTE_MARKERS = ("\x1b[200~", "\x1b[201~")
 
-    Used for values that embed credentials (e.g. a DATABASE_URL) so they never
-    land in argv, shell history, sudo logs, or /proc/<pid>/cmdline.
+
+def _read_tty_line(prompt: str) -> str:
+    """Write `prompt` to the controlling terminal and read one echoed line.
+
+    Uses separate read/write handles: a single r+ text stream on /dev/tty is not
+    seekable, so mixing a write and a read on it raises UnsupportedOperation.
+    """
+    with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
+        out.write(prompt)
+        out.flush()
+        return inp.readline()
+
+
+def prompt_line(prompt: str) -> str:
+    """Read a single non-empty line from the controlling terminal (echoed).
+
+    Used for values that must be entered interactively — so they never land in
+    argv, shell history, sudo logs, or /proc/<pid>/cmdline — but do not need to
+    be hidden on screen. Unlike a no-echo getpass prompt (which some terminals
+    refuse to let you paste into, or corrupt with bracketed-paste codes), this
+    echoes the input, so pasting works reliably.
     """
     if not _tty_available():
         raise NoTTYError("no interactive terminal available")
-    value = getpass.getpass(prompt).strip()
+    line = _read_tty_line(prompt)
+    if not line:
+        raise NoTTYError("no input read from terminal")
+    for marker in _PASTE_MARKERS:
+        line = line.replace(marker, "")
+    value = line.strip()
     if not value:
         raise CryptoError("value must not be empty")
     return value

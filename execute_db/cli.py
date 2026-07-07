@@ -507,7 +507,7 @@ def cmd_config_set(alias: str):
     print(f"{action} environment '{alias}'.")
 
     try:
-        url = crypto.prompt_secret_line(f"Connection URL for '{alias}': ")
+        url = crypto.prompt_line(f"Connection URL for '{alias}': ")
     except crypto.NoTTYError:
         fail("A terminal is required to enter the connection URL "
              "(it must not be passed on the command line).")

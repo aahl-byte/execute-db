@@ -3,25 +3,32 @@ import pytest
 from execute_db import cli, crypto
 
 
-# --- prompt_secret_line ------------------------------------------------------
+# --- prompt_line -------------------------------------------------------------
 
-def test_prompt_secret_line_rejects_empty(monkeypatch):
+def test_prompt_line_rejects_empty(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: True)
-    monkeypatch.setattr(crypto.getpass, "getpass", lambda prompt="": "")
+    monkeypatch.setattr(crypto, "_read_tty_line", lambda prompt: "  \n")
     with pytest.raises(crypto.CryptoError):
-        crypto.prompt_secret_line("URL: ")
+        crypto.prompt_line("URL: ")
 
 
-def test_prompt_secret_line_returns_value(monkeypatch):
+def test_prompt_line_returns_value(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: True)
-    monkeypatch.setattr(crypto.getpass, "getpass", lambda prompt="": "postgresql://a")
-    assert crypto.prompt_secret_line("URL: ") == "postgresql://a"
+    monkeypatch.setattr(crypto, "_read_tty_line", lambda prompt: "postgresql://a\n")
+    assert crypto.prompt_line("URL: ") == "postgresql://a"
 
 
-def test_prompt_secret_line_requires_tty(monkeypatch):
+def test_prompt_line_strips_bracketed_paste(monkeypatch):
+    monkeypatch.setattr(crypto, "_tty_available", lambda: True)
+    monkeypatch.setattr(crypto, "_read_tty_line",
+                        lambda prompt: "\x1b[200~postgresql://a\x1b[201~\n")
+    assert crypto.prompt_line("URL: ") == "postgresql://a"
+
+
+def test_prompt_line_requires_tty(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: False)
     with pytest.raises(crypto.NoTTYError):
-        crypto.prompt_secret_line("URL: ")
+        crypto.prompt_line("URL: ")
 
 
 # --- config list -------------------------------------------------------------
@@ -44,7 +51,7 @@ def test_config_list_empty(store, capsys):
 # --- config set --------------------------------------------------------------
 
 def test_config_set_creates_encrypted_env(store, monkeypatch):
-    monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "postgresql://u:p@h/db")
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://u:p@h/db")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "hunter2")
     cli.cmd_config_set("dev")
 
@@ -63,7 +70,7 @@ def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "CONFIG_DIR", d)
     monkeypatch.setattr(cli, "CONFIG_FILE", d / "config.json")
     monkeypatch.setattr(cli, "in_system_mode", lambda: False)
-    monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "postgresql://x")
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://x")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
     cli.cmd_config_set("dev")
     assert (d / ".env.dev").exists()
@@ -72,14 +79,14 @@ def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
 
 def test_config_set_replaces_existing(store, monkeypatch):
     (store / ".env.dev").write_bytes(b"old")
-    monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "postgresql://new")
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://new")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
     cli.cmd_config_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
 
 
 def test_config_set_rejects_non_postgres_url(store, monkeypatch):
-    monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "mysql://x")
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: "mysql://x")
     with pytest.raises(SystemExit):
         cli.cmd_config_set("dev")
 
