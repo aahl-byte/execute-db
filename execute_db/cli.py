@@ -482,6 +482,115 @@ def selected_env(args, envs: list) -> str:
     return next((e for e in envs if getattr(args, env_dest(e))), None)
 
 
+def validate_alias(alias: str):
+    if alias in RESERVED_NAMES or not ENV_NAME_RE.match(alias):
+        fail(f"Invalid environment name {alias!r} "
+             f"(must match {ENV_NAME_RE.pattern} and not be reserved)")
+
+
+def cmd_config_list():
+    envs = discover_envs()
+    if not envs:
+        print("No environments. Create one with `execute-db config set <name>`.")
+        return
+    for env in envs:
+        state = "encrypted" if crypto.is_encrypted(env_file_path(env)) else "plaintext"
+        print(f"{env}  ({state})")
+
+
+def cmd_config_set(alias: str):
+    validate_alias(alias)
+    path = env_file_path(alias)
+    action = "Replacing" if path.exists() else "Creating"
+    print(f"{action} environment '{alias}'.")
+
+    try:
+        url = crypto.prompt_secret_line(f"Connection URL for '{alias}': ")
+    except crypto.NoTTYError:
+        fail("A terminal is required to enter the connection URL "
+             "(it must not be passed on the command line).")
+    if not (url.startswith("postgresql://") or url.startswith("postgres://")):
+        fail("URL must start with postgresql:// or postgres://")
+
+    try:
+        password = crypto.prompt_password(f"New password for '{alias}': ", confirm=True)
+    except crypto.CryptoError as e:
+        fail(str(e))
+
+    blob = crypto.encrypt(f"DATABASE_URL={url}\n".encode(), password)
+    write_encrypted(path, blob)   # temp write + chmod 600 + atomic replace
+    print(f"Saved {path}")
+    print("If you forget the password, run `config set` again to overwrite it.")
+
+
+def revoke_all_tokens() -> int:
+    """Remove every outstanding token file and its kernel key share.
+
+    Tokens are self-contained encrypted URL snapshots with no env identity, so
+    removing one environment can't target 'its' tokens; we revoke all of them.
+    Best-effort per token so one failure doesn't strand the rest.
+    """
+    if not EPHEMERAL_DIR.is_dir():
+        return 0
+    count = 0
+    for p in sorted(EPHEMERAL_DIR.glob(".env.*")):
+        tid = p.name.removeprefix(".env.")
+        try:
+            kernel_keyring.remove(share_desc(tid), persistent=in_system_mode())
+        except Exception:
+            pass
+        try:
+            crypto.secure_wipe(p)
+            count += 1
+        except OSError:
+            pass
+    return count
+
+
+def cmd_config_rm(alias: str):
+    validate_alias(alias)
+    path = env_file_path(alias)
+    if not path.exists():
+        fail(f"No environment '{alias}' (see `execute-db config list`).")
+    crypto.secure_wipe(path)
+    revoked = revoke_all_tokens()
+    print(f"Removed environment '{alias}'.")
+    if revoked:
+        print(f"Revoked {revoked} outstanding token(s). Rotate the database "
+              f"password server-side to fully cut off access.")
+
+
+def config_main():
+    parser = argparse.ArgumentParser(
+        prog="execute-db config",
+        description="Manage execute-db environments (each is a .env.<name> file).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  execute-db config list\n"
+               "  execute-db config set dev       # prompts for URL + password\n"
+               "  execute-db config rm staging",
+    )
+    sub = parser.add_subparsers(dest="action", required=True, metavar="{list,set,rm}")
+    sub.add_parser("list", help="list configured environments")
+    p_set = sub.add_parser("set", help="create or replace an environment")
+    p_set.add_argument("alias", help="environment name (e.g. dev)")
+    p_rm = sub.add_parser("rm", help="remove an environment and revoke tokens")
+    p_rm.add_argument("alias", help="environment name to remove")
+
+    args = parser.parse_args(sys.argv[2:])
+    try:
+        if args.action == "list":
+            cmd_config_list()
+        elif args.action == "set":
+            cmd_config_set(args.alias)
+        elif args.action == "rm":
+            cmd_config_rm(args.alias)
+    except crypto.NoTTYError:
+        fail("This command needs an interactive terminal.")
+    except crypto.CryptoError as e:
+        fail(str(e))
+
+
 def manage_main():
     """Handle the `password` and `token` management subcommands."""
     envs = discover_envs()
@@ -714,6 +823,12 @@ def maybe_redirect_to_launcher():
 
 def main():
     maybe_redirect_to_launcher()
+
+    # `config` manages the store in place (and must work with zero envs), so it
+    # runs after the launcher redirect but before the env-flag-building paths.
+    if len(sys.argv) > 1 and sys.argv[1] == "config":
+        config_main()
+        return
 
     # Backstop: the systemd timers do the wall-clock wiping, but sweep here too
     # in case they were unavailable. Skip for `token` commands, which sweep for
