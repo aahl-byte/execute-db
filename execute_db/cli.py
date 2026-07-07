@@ -292,12 +292,23 @@ def run_query(database_url: str, sql: str):
         conn.close()
 
 
-def add_env_flags(parser: argparse.ArgumentParser, envs: list, required: bool = True):
+def env_flag_help(config: dict, env: str) -> str:
+    """Describe an env flag, marking how the environment is stored."""
+    path = env_file_path(config, env)
+    if path is None:
+        return f"the '{env}' environment (plaintext URL in config.json)"
+    if crypto.is_encrypted(path):
+        return f"the '{env}' environment (password protected)"
+    return f"the '{env}' environment (plaintext {path.name})"
+
+
+def add_env_flags(parser: argparse.ArgumentParser, envs: list, config: dict,
+                  required: bool = True):
     group = parser.add_mutually_exclusive_group(required=required)
     for env in envs:
         group.add_argument(
             f"--{env}", dest=env_dest(env), action="store_true",
-            help=f"connect to {env}",
+            help=env_flag_help(config, env),
         )
     return group
 
@@ -315,27 +326,102 @@ def manage_main():
     config = load_config()
     envs = config_environments(config)
 
+    raw = argparse.RawDescriptionHelpFormatter
     parser = argparse.ArgumentParser(
         prog="execute-db",
-        description="Manage execute-db environment access.",
+        description="Manage access to execute-db environments.",
+        epilog='examples:\n'
+               '  execute-db password set --dev\n'
+               '  execute-db password change --dev\n'
+               '  execute-db token create --dev --ttl 2h\n'
+               '  execute-db token list\n'
+               '  execute-db token revoke 8df8dbeb3696',
+        formatter_class=raw,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{password,token}")
 
-    p_password = sub.add_parser("password", help="manage env file encryption passwords")
-    pw_sub = p_password.add_subparsers(dest="action", required=True)
-    p_set = pw_sub.add_parser("set", help="encrypt a plaintext .env file with a new password")
-    add_env_flags(p_set, envs)
-    p_change = pw_sub.add_parser("change", help="change the password of an encrypted .env file")
-    add_env_flags(p_change, envs)
+    p_password = sub.add_parser(
+        "password",
+        help="encrypt env files with a password / rotate passwords",
+        description=(
+            "Encrypt an environment's .env file so it can only be used after\n"
+            "entering its password on an interactive terminal.\n\n"
+            "Files are encrypted with AES-256-GCM (scrypt-derived key). There is\n"
+            "no password recovery: if you forget it, delete the encrypted file,\n"
+            "recreate it with your connection string, and set a password again."
+        ),
+        formatter_class=raw,
+    )
+    pw_sub = p_password.add_subparsers(dest="action", required=True, metavar="{set,change}")
+    p_set = pw_sub.add_parser(
+        "set",
+        help="encrypt a plaintext .env file with a new password",
+        description=(
+            "Encrypt an environment's plaintext .env file. Prompts for a new\n"
+            "password (twice) on the terminal, encrypts the file, and makes a\n"
+            "best-effort wipe of the plaintext original.\n\n"
+            "Afterwards, running SQL against the environment prompts for the\n"
+            "password; non-interactive callers are refused (use an ephemeral\n"
+            "token for that — see `execute-db token create --help`)."
+        ),
+        formatter_class=raw,
+    )
+    add_env_flags(p_set, envs, config)
+    p_change = pw_sub.add_parser(
+        "change",
+        help="change the password of an encrypted .env file",
+        description=(
+            "Rotate an environment's password: prompts for the current password,\n"
+            "then a new one (twice). The decrypted contents never touch disk."
+        ),
+        formatter_class=raw,
+    )
+    add_env_flags(p_change, envs, config)
 
-    p_token = sub.add_parser("token", help="manage ephemeral access tokens")
-    tok_sub = p_token.add_subparsers(dest="action", required=True)
-    p_create = tok_sub.add_parser("create", help="create a short-lived token for an environment")
-    add_env_flags(p_create, envs)
-    p_create.add_argument("--ttl", required=True, help="token lifetime, e.g. 30m, 2h, 1d")
-    tok_sub.add_parser("list", help="list active tokens (purges expired ones)")
-    p_revoke = tok_sub.add_parser("revoke", help="revoke a token by id")
-    p_revoke.add_argument("id", help="token id (from `token list`)")
+    p_token = sub.add_parser(
+        "token",
+        help="create/list/revoke short-lived password-free access tokens",
+        description=(
+            "Ephemeral tokens grant temporary, password-free access to one\n"
+            "environment — e.g. handing a script or coding agent scoped access\n"
+            "for an afternoon. A token works without a terminal until it expires\n"
+            "or is revoked."
+        ),
+        formatter_class=raw,
+    )
+    tok_sub = p_token.add_subparsers(dest="action", required=True, metavar="{create,list,revoke}")
+    p_create = tok_sub.add_parser(
+        "create",
+        help="create a short-lived token for an environment",
+        description=(
+            "Create a token for one environment. If the environment is password\n"
+            "protected you are prompted for its password — the token is a copy of\n"
+            "the credentials re-encrypted under a fresh random secret with the\n"
+            "expiry sealed into the authenticated header.\n\n"
+            "The token is printed ONCE and cannot be recovered; pass it to the\n"
+            'holder, who runs:  execute-db --token <TOKEN> "SELECT ..."'
+        ),
+        formatter_class=raw,
+    )
+    add_env_flags(p_create, envs, config)
+    p_create.add_argument("--ttl", required=True, metavar="DURATION",
+                          help="token lifetime: <n>s|m|h|d, e.g. 45s, 30m, 2h, 1d")
+    tok_sub.add_parser(
+        "list",
+        help="list active tokens (purges expired ones)",
+        description=(
+            "List active token ids and their expiry times. Token files that have\n"
+            "already expired are deleted as a side effect. The token secrets\n"
+            "themselves are never shown — they are only displayed at creation."
+        ),
+        formatter_class=raw,
+    )
+    p_revoke = tok_sub.add_parser(
+        "revoke",
+        help="revoke a token by id, before it expires",
+        description="Delete a token so it stops working immediately.",
+    )
+    p_revoke.add_argument("id", help="token id, as shown by `execute-db token list`")
 
     args = parser.parse_args()
 
@@ -362,25 +448,39 @@ def manage_main():
 def exec_main():
     parser = argparse.ArgumentParser(
         prog="execute-db",
-        description="Execute SQL statements against configured databases.",
+        description=(
+            "Execute SQL statements against configured databases.\n\n"
+            "Statements run in a single transaction: committed on success, rolled\n"
+            f"back on error. Environments are the keys of {CONFIG_FILE};\n"
+            "each key becomes an --<env> flag. Password-protected environments\n"
+            "prompt for their password on the terminal."
+        ),
         epilog='examples:\n'
                '  execute-db --dev "INSERT INTO users (name) VALUES (\'Alice\')"\n'
                '  execute-db --dev -f migration.sql\n'
                '  execute-db --dev < migration.sql\n'
-               '  execute-db password set --dev\n'
-               '  execute-db password change --dev\n'
-               '  execute-db token create --dev --ttl 2h\n'
-               '  execute-db --token TOKEN "SELECT 1"',
+               '  execute-db --token 8YOfCttjVdI5FdUfB-X6Vw "SELECT 1"\n'
+               '\n'
+               'management commands (details: execute-db <command> --help):\n'
+               '  password set --<env>            encrypt an env file with a password\n'
+               '  password change --<env>         rotate an env file\'s password\n'
+               '  token create --<env> --ttl 2h   mint a short-lived password-free token\n'
+               '  token list                      show active tokens\n'
+               '  token revoke <id>               revoke a token early',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     config = load_config()
     envs = config_environments(config)
-    group = add_env_flags(parser, envs)
-    group.add_argument("--token", metavar="TOKEN", help="connect with an ephemeral access token")
+    group = add_env_flags(parser, envs, config)
+    group.add_argument("--token", metavar="TOKEN",
+                       help="connect with an ephemeral access token instead of an "
+                            "environment (no password prompt; see `execute-db token --help`)")
 
-    parser.add_argument("sql", nargs="?", help="SQL statement to execute")
-    parser.add_argument("-f", "--file", help="path to a .sql file to execute")
+    parser.add_argument("sql", nargs="?",
+                        help="SQL statement to execute (omit to read from -f FILE or stdin)")
+    parser.add_argument("-f", "--file", metavar="FILE",
+                        help="read the SQL to execute from a .sql file")
     args = parser.parse_args()
 
     if args.token:
