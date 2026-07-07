@@ -20,6 +20,8 @@ Or for development:
 git clone https://github.com/aahl-byte/execute-db.git && pip install -e execute-db
 ```
 
+> Running alongside coding agents or other untrusted same-user processes? Use the [hardened install](#hardened-install-privilege-separation) instead — it moves your credentials and the CLI under a dedicated user so they can't be read or tampered with.
+
 ## Setup
 
 On first run, `execute-db` creates a default config directory at `~/.execute-db/` containing:
@@ -127,7 +129,14 @@ The hardened install closes that gap by moving secrets and the CLI under a dedic
 curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh | sudo bash
 ```
 
-(Pin to a commit you trust with `... | sudo bash -s -- --ref <sha>`; the install runs `pip` as root against that ref.)
+The install runs `pip` as root against the repo, so **pin to a commit you have reviewed** rather than tracking the moving `main` branch:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh \
+  | sudo bash -s -- --ref <commit-sha>
+```
+
+Re-running the command upgrades in place; pass `--ref` again to move to a newer reviewed commit.
 
 What it sets up:
 
