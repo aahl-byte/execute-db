@@ -14,3 +14,9 @@ dependencies = [
 
 [project.scripts]
 execute-db = "execute_db.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
