@@ -500,6 +500,8 @@ def cmd_config_list():
 
 def cmd_config_set(alias: str):
     validate_alias(alias)
+    # First run: the store dir may not exist yet. Create it 0700 before writing.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = env_file_path(alias)
     action = "Replacing" if path.exists() else "Creating"
     print(f"{action} environment '{alias}'.")

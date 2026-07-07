@@ -57,6 +57,19 @@ def test_config_set_creates_encrypted_env(store, monkeypatch):
     assert not (store / ".env.dev.tmp").exists()
 
 
+def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
+    # No `store` fixture: the store dir does not exist yet (fresh machine).
+    d = tmp_path / ".execute-db"
+    monkeypatch.setattr(cli, "CONFIG_DIR", d)
+    monkeypatch.setattr(cli, "CONFIG_FILE", d / "config.json")
+    monkeypatch.setattr(cli, "in_system_mode", lambda: False)
+    monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "postgresql://x")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    cli.cmd_config_set("dev")
+    assert (d / ".env.dev").exists()
+    assert oct(d.stat().st_mode)[-3:] == "700"
+
+
 def test_config_set_replaces_existing(store, monkeypatch):
     (store / ".env.dev").write_bytes(b"old")
     monkeypatch.setattr(crypto, "prompt_secret_line", lambda p: "postgresql://new")
