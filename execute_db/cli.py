@@ -498,6 +498,47 @@ def cmd_config_list():
         print(f"{env}  ({state})")
 
 
+def redact_url(url: str) -> str:
+    """Mask the password in a connection URL for safe on-screen display.
+
+    postgresql://user:secret@host/db -> postgresql://user:****@host/db
+    Only the userinfo password is touched; everything else is preserved verbatim.
+    """
+    return re.sub(r"(://[^:/@]+:)[^@/]*(@)", r"\1****\2", url, count=1)
+
+
+def prompt_confirm(question: str) -> bool:
+    """Ask a yes/no question, reading the answer from the controlling terminal."""
+    print(question, end="", flush=True)
+    try:
+        with open("/dev/tty") as tty:
+            answer = tty.readline()
+    except OSError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def read_connection_url(alias: str) -> str:
+    """Prompt (hidden) for a Postgres URL, echo a password-redacted preview, and
+    confirm it before use. Re-prompts on an empty/invalid URL or a declined
+    preview, so a mis-paste can be retried without exposing the credential."""
+    while True:
+        try:
+            url = crypto.prompt_line(f"Connection URL for '{alias}': ")
+        except crypto.NoTTYError:
+            fail("A terminal is required to enter the connection URL "
+                 "(it must not be passed on the command line).")
+        except crypto.CryptoError as e:
+            print(str(e), file=sys.stderr)
+            continue
+        if not (url.startswith("postgresql://") or url.startswith("postgres://")):
+            print("URL must start with postgresql:// or postgres://", file=sys.stderr)
+            continue
+        print(f"Read: {redact_url(url)}")
+        if prompt_confirm("Looks right? [y/N] "):
+            return url
+
+
 def cmd_config_set(alias: str):
     validate_alias(alias)
     # First run: the store dir may not exist yet. Create it 0700 before writing.
@@ -506,13 +547,7 @@ def cmd_config_set(alias: str):
     action = "Replacing" if path.exists() else "Creating"
     print(f"{action} environment '{alias}'.")
 
-    try:
-        url = crypto.prompt_line(f"Connection URL for '{alias}': ")
-    except crypto.NoTTYError:
-        fail("A terminal is required to enter the connection URL "
-             "(it must not be passed on the command line).")
-    if not (url.startswith("postgresql://") or url.startswith("postgres://")):
-        fail("URL must start with postgresql:// or postgres://")
+    url = read_connection_url(alias)
 
     try:
         password = crypto.prompt_password(f"New password for '{alias}': ", confirm=True)

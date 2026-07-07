@@ -53,6 +53,7 @@ def test_config_list_empty(store, capsys):
 def test_config_set_creates_encrypted_env(store, monkeypatch):
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://u:p@h/db")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "hunter2")
+    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
 
     path = store / ".env.dev"
@@ -72,6 +73,7 @@ def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "in_system_mode", lambda: False)
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://x")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
     assert (d / ".env.dev").exists()
     assert oct(d.stat().st_mode)[-3:] == "700"
@@ -81,14 +83,40 @@ def test_config_set_replaces_existing(store, monkeypatch):
     (store / ".env.dev").write_bytes(b"old")
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://new")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
 
 
-def test_config_set_rejects_non_postgres_url(store, monkeypatch):
-    monkeypatch.setattr(crypto, "prompt_line", lambda p: "mysql://x")
-    with pytest.raises(SystemExit):
-        cli.cmd_config_set("dev")
+def test_config_set_reprompts_on_bad_url(store, monkeypatch, capsys):
+    urls = iter(["mysql://x", "postgresql://ok"])
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
+    cli.cmd_config_set("dev")
+    assert crypto.is_encrypted(store / ".env.dev")
+    assert "must start with postgresql" in capsys.readouterr().err
+
+
+def test_config_set_reprompts_when_preview_declined(store, monkeypatch):
+    urls = iter(["postgresql://wrong", "postgresql://right"])
+    confirms = iter([False, True])
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(cli, "prompt_confirm", lambda q: next(confirms))
+    cli.cmd_config_set("dev")
+    text = crypto.decrypt((store / ".env.dev").read_bytes(), "pw").decode()
+    assert "postgresql://right" in text
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("postgresql://user:secret@host:5432/db", "postgresql://user:****@host:5432/db"),
+    ("postgres://u:p@h/d", "postgres://u:****@h/d"),
+    ("postgresql://host/db", "postgresql://host/db"),
+    ("postgresql://user@host/db", "postgresql://user@host/db"),
+])
+def test_redact_url(url, expected):
+    assert cli.redact_url(url) == expected
 
 
 @pytest.mark.parametrize("bad", ["token", "config", "1abc", "a b", "../x", ""])
