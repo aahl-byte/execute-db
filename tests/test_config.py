@@ -7,21 +7,21 @@ from execute_db import cli, crypto
 
 def test_prompt_line_rejects_empty(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: True)
-    monkeypatch.setattr(crypto, "_read_tty_line", lambda prompt: "  \n")
+    monkeypatch.setattr(crypto.getpass, "getpass", lambda prompt="": "  ")
     with pytest.raises(crypto.CryptoError):
         crypto.prompt_line("URL: ")
 
 
 def test_prompt_line_returns_value(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: True)
-    monkeypatch.setattr(crypto, "_read_tty_line", lambda prompt: "postgresql://a\n")
+    monkeypatch.setattr(crypto.getpass, "getpass", lambda prompt="": "postgresql://a")
     assert crypto.prompt_line("URL: ") == "postgresql://a"
 
 
 def test_prompt_line_strips_bracketed_paste(monkeypatch):
     monkeypatch.setattr(crypto, "_tty_available", lambda: True)
-    monkeypatch.setattr(crypto, "_read_tty_line",
-                        lambda prompt: "\x1b[200~postgresql://a\x1b[201~\n")
+    monkeypatch.setattr(crypto.getpass, "getpass",
+                        lambda prompt="": "\x1b[200~postgresql://a\x1b[201~")
     assert crypto.prompt_line("URL: ") == "postgresql://a"
 
 

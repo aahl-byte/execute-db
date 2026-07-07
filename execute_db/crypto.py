@@ -120,48 +120,24 @@ def _tty_available() -> bool:
         return False
 
 
-# Bracketed-paste markers a terminal wraps around pasted text. We never enable
-# bracketed paste, but some terminals/multiplexers leave it on globally, which
-# would otherwise corrupt a pasted value; strip them defensively.
+# Bracketed-paste markers a terminal (or tmux) wraps around pasted text. When a
+# paste is read with echo off, the markers are delivered as input bytes; strip
+# them so they don't corrupt the value.
 _PASTE_MARKERS = ("\x1b[200~", "\x1b[201~")
 
 
-def _read_tty_line(prompt: str) -> str:
-    """Write `prompt` to the controlling terminal and read one echoed line.
-
-    Uses separate read/write handles: a single r+ text stream on /dev/tty is not
-    seekable, so mixing a write and a read on it raises UnsupportedOperation.
-
-    Bracketed-paste mode (left enabled by the shell) makes the terminal wrap a
-    paste in \\e[200~ ... \\e[201~ markers that get echoed on screen and left in
-    the input buffer. Disable it (\\e[?2004l) for the duration of the prompt so a
-    paste arrives as plain text; the shell re-enables it at its next prompt.
-    """
-    with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
-        out.write("\x1b[?2004l")   # disable bracketed paste
-        out.write(prompt)
-        out.flush()
-        try:
-            return inp.readline()
-        finally:
-            out.write("\x1b[?2004h")   # restore bracketed paste
-            out.flush()
-
-
 def prompt_line(prompt: str) -> str:
-    """Read a single non-empty line from the controlling terminal (echoed).
+    """Read a single non-empty line from the terminal WITHOUT echo.
 
-    Used for values that must be entered interactively — so they never land in
-    argv, shell history, sudo logs, or /proc/<pid>/cmdline — but do not need to
-    be hidden on screen. Unlike a no-echo getpass prompt (which some terminals
-    refuse to let you paste into, or corrupt with bracketed-paste codes), this
-    echoes the input, so pasting works reliably.
+    Used for values that embed a credential (e.g. a DATABASE_URL) and must never
+    appear on screen, in argv, shell history, sudo logs, or /proc/<pid>/cmdline.
+    Reads via getpass (echo off) so a pasted value — and any bracketed-paste
+    escape markers a terminal or tmux wraps around the paste — is not echoed to
+    the screen or scrollback; the markers are then stripped from the value.
     """
     if not _tty_available():
         raise NoTTYError("no interactive terminal available")
-    line = _read_tty_line(prompt)
-    if not line:
-        raise NoTTYError("no input read from terminal")
+    line = getpass.getpass(prompt)
     for marker in _PASTE_MARKERS:
         line = line.replace(marker, "")
     value = line.strip()
