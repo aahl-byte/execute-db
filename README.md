@@ -6,30 +6,45 @@ Statements run in a transaction that is **committed on success** and rolled back
 
 Connection credentials can be **password-encrypted at rest**: an encrypted environment can only be used by entering its password on an interactive terminal, or via a short-lived [ephemeral token](#ephemeral-tokens). This keeps non-interactive callers (scripts, coding agents) from reading your connection strings or executing queries without your say-so.
 
-**Contents:** [Installation](#installation) · [Setup](#setup) · [Usage](#usage) · [Password protection](#password-protection) · [Ephemeral tokens](#ephemeral-tokens) · [Hardened install](#hardened-install-privilege-separation) · [Threat model](#threat-model)
+**Contents:** 
+- [Installation](#installation) 
+- [Setup](#setup) 
+- [Usage](#usage) 
+- [Password protection](#password-protection) 
+- [Ephemeral tokens](#ephemeral-tokens) 
+- [Hardened install](#hardened-install-privilege-separation) 
+- [Threat model](#threat-model)
 
 ## Installation
 
 Requires Python 3.9+.
 
-**The recommended install is hardened ([privilege separation](#hardened-install-privilege-separation)).** On any machine where other processes run as you — coding agents especially — it's the only setup that stops them reading your credentials or tampering with the CLI you type your password into:
+### Lightweight installation
 
 ```bash
-# 1. install the CLI
 pip install git+https://github.com/aahl-byte/execute-db
-
-# 2. configure and ENCRYPT each environment (see Setup + Password protection)
-execute-db --dev "SELECT 1"       # writes ~/.execute-db — then edit the connection strings
-execute-db password set --dev     # repeat for every environment
-
-# 3. harden — move secrets + a frozen CLI under a dedicated service user
-curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh \
-  | sudo bash -s -- --ref <commit-sha>
 ```
 
-See [Hardened install](#hardened-install-privilege-separation) for what step 3 does and why to pin `--ref`.
+### hardened installation
 
-**Lightweight (trusted single-user machine).** If nothing untrusted runs under your account, stop after steps 1–2 and skip hardening — credentials stay encrypted at rest, though a same-user process could read the key material while a token is live.
+**The recommended install is hardened ([privilege separation](#hardened-install-privilege-separation)).**  
+- the hardened installation closes a loophole where encrypted token environment files can be copied and decrypted while the token is still live
+- this installs the cli and config files to its own dedicated user to protect reads from other user processes
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh | sudo bash
+```
+
+
+### create config
+
+see [setup](#setup)
+
+### encrypting environment configs
+
+``` bash
+execute-db password set --dev # repeat for every environment
+```
 
 ## Setup
 
