@@ -6,33 +6,20 @@ Statements run in a transaction that is **committed on success** and rolled back
 
 Connection credentials can be **password-encrypted at rest**: an encrypted environment can only be used by entering its password on an interactive terminal, or via a short-lived [ephemeral token](#ephemeral-tokens). This keeps non-interactive callers (scripts, coding agents) from reading your connection strings or executing queries without your say-so.
 
+**Contents:** [Installation](#installation) · [Setup](#setup) · [Usage](#usage) · [Password protection](#password-protection) · [Ephemeral tokens](#ephemeral-tokens) · [Hardened install](#hardened-install-privilege-separation) · [Threat model](#threat-model)
+
 ## Installation
 
-Requires Python 3.9+.
-
-**The recommended install is [hardened (privilege separation)](#hardened-install-privilege-separation).** On any machine where other processes run as you — coding agents especially — it's the only setup that stops them reading your credentials or tampering with the CLI you type your password into. The three steps:
+Requires Python 3.9+. Install the CLI:
 
 ```bash
-# 1. get the CLI
 pip install git+https://github.com/aahl-byte/execute-db
-
-# 2. configure and ENCRYPT each environment (see Setup + Password protection below)
-execute-db --dev "SELECT 1"          # writes ~/.execute-db, then edit the connection strings
-execute-db password set --dev        # repeat for every environment
-
-# 3. harden — move secrets + a frozen CLI under a dedicated service user
-curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh \
-  | sudo bash -s -- --ref <commit-sha>
 ```
 
-See [Hardened install](#hardened-install-privilege-separation) for what step 3 sets up and why to pin `--ref`.
+Then [configure](#setup) and [encrypt](#password-protection) your environments, and choose how to run it:
 
-**Lightweight install (single-user / trusted machine only).** If nothing untrusted runs under your account, you can stop after steps 1–2 and skip hardening — credentials stay encrypted at rest, but a same-user process could read the key material while a token is live.
-
-```bash
-# development checkout
-git clone https://github.com/aahl-byte/execute-db.git && pip install -e execute-db
-```
+- **Hardened (recommended)** — on any machine where other processes run as you, coding agents especially, this is the only setup that stops them reading your credentials or tampering with the CLI you type your password into. After encrypting your environments, run the [hardened install](#hardened-install-privilege-separation).
+- **Lightweight** — on a trusted single-user machine the pip install above is enough. Credentials stay encrypted at rest, though a same-user process could read the key material while a token is live.
 
 ## Setup
 
@@ -76,6 +63,33 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 Environments are not fixed — **every key in `config.json` becomes a `--<name>` flag**. Add an entry like `"dev_alt_db": ".env.dev_alt_db"` and `execute-db --dev_alt_db ...` works immediately. Use this to give the same database different access types, or to reach databases beyond the default trio.
 
 Names must match `[A-Za-z][A-Za-z0-9_-]*`; reserved names (`token`, `file`, `f`, `sql`, `help`, `password`) are ignored with a warning.
+
+## Usage
+
+Pick an environment with `--dev`, `--staging`, `--production` (or any configured name), then provide the SQL inline, from a file, or on stdin:
+
+```bash
+execute-db --dev "INSERT INTO users (name) VALUES ('Alice')"
+execute-db --staging -f migration.sql
+cat migration.sql | execute-db --production
+```
+
+Statements that return rows (`SELECT`, or `... RETURNING`) print the column names, row count, and rows as JSON:
+
+```
+Columns: ['id', 'name', 'email']
+Row count: 2
+[
+  { "id": 1, "name": "Alice", "email": "alice@example.com" },
+  { "id": 2, "name": "Bob",   "email": "bob@example.com" }
+]
+```
+
+Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print the affected row count instead:
+
+```
+Rows affected: 1
+```
 
 ## Password protection
 
@@ -135,22 +149,14 @@ Wipes use the same best-effort overwrite-then-delete as `password set`. If you w
 
 Everything above runs as *you*, so another process running under your account — a script, a coding agent — can, while a token is valid, read the secret files, read the kernel keyring share, or even edit the CLI code you type your password into. Client-side crypto can't beat a same-user adversary.
 
-The hardened install closes that gap by moving secrets and the CLI under a dedicated service user:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh | sudo bash
-```
-
-The install runs `pip` as root against the repo, so **pin to a commit you have reviewed** rather than tracking the moving `main` branch:
+The hardened install closes that gap by moving secrets and the CLI under a dedicated service user. It runs `pip` as root against the repo, so **pin `--ref` to a commit you have reviewed** rather than tracking the moving `main` branch:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh \
   | sudo bash -s -- --ref <commit-sha>
 ```
 
-Re-running the command upgrades in place; pass `--ref` again to move to a newer reviewed commit.
-
-What it sets up:
+Re-running the command upgrades in place; pass `--ref` again to move to a newer reviewed commit. **What it sets up:**
 
 - A system user **`executedb`** owns `/var/lib/execute-db/.execute-db` (mode `0700`). Your encrypted envs and tokens move there — **unreadable to your own account**.
 - A **root-owned frozen copy** of the CLI at `/usr/local/lib/execute-db/venv` — your account can't patch the code that handles your password.
@@ -184,52 +190,3 @@ What it **cannot** protect:
 - **Installer trust-on-first-use** — `curl | sudo bash` trusts the repo the first time; pin `--ref` to a reviewed commit and protect the repo.
 
 Client-side crypto fundamentally cannot revoke knowledge. To *actually* cut off exposed credentials, act server-side: rotate the database password, or issue database roles with `VALID UNTIL` so the server itself refuses logins after a deadline.
-
-## Usage
-
-Pick an environment with `--dev`, `--staging`, `--production` (or any configured name), then provide SQL in one of three ways:
-
-**Inline statement:**
-
-```bash
-execute-db --dev "INSERT INTO users (name) VALUES ('Alice')"
-```
-
-**From a file:**
-
-```bash
-execute-db --staging -f migration.sql
-```
-
-**Piped from stdin:**
-
-```bash
-cat migration.sql | execute-db --production
-```
-
-### Output
-
-Statements that return rows (`SELECT`, or `... RETURNING`) print the column names, row count, and rows as JSON:
-
-```
-Columns: ['id', 'name', 'email']
-Row count: 2
-[
-  {
-    "id": 1,
-    "name": "Alice",
-    "email": "alice@example.com"
-  },
-  {
-    "id": 2,
-    "name": "Bob",
-    "email": "bob@example.com"
-  }
-]
-```
-
-Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print the affected row count:
-
-```
-Rows affected: 1
-```
