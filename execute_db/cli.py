@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from io import StringIO
 from pathlib import Path
@@ -13,7 +14,23 @@ from . import crypto
 CONFIG_DIR = Path.home() / ".execute-db"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-ENVIRONMENTS = ["dev", "staging", "production"]
+DEFAULT_ENVIRONMENTS = ["dev", "staging", "production"]
+
+# Environments are defined by config.json keys; each key becomes an --<env> flag.
+ENV_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+RESERVED_NAMES = {"password", "token", "file", "f", "help", "sql"}
+
+
+def config_environments(config: dict) -> list:
+    envs = []
+    for name in config:
+        if name in RESERVED_NAMES or not ENV_NAME_RE.match(name):
+            print(f"Ignoring invalid environment name in {CONFIG_FILE}: {name!r}", file=sys.stderr)
+            continue
+        envs.append(name)
+    if not envs:
+        fail(f"No valid environments defined in {CONFIG_FILE}")
+    return envs
 
 
 def fail(message: str):
@@ -25,17 +42,17 @@ def init_config():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     CONFIG_FILE.write_text(json.dumps(
-        {e: f".env.{e}" for e in ENVIRONMENTS}, indent=2,
+        {e: f".env.{e}" for e in DEFAULT_ENVIRONMENTS}, indent=2,
     ) + "\n")
 
-    for env in ENVIRONMENTS:
+    for env in DEFAULT_ENVIRONMENTS:
         env_file = CONFIG_DIR / f".env.{env}"
         env_file.write_text(f"DATABASE_URL=postgresql://user:password@host:5432/dbname\n")
 
     print(f"Created default config at: {CONFIG_DIR}")
     print(f"Update your connection strings before running queries:")
     print(f"  {CONFIG_FILE}")
-    for env in ENVIRONMENTS:
+    for env in DEFAULT_ENVIRONMENTS:
         print(f"  {CONFIG_DIR / f'.env.{env}'}")
     sys.exit(0)
 
@@ -176,9 +193,9 @@ def run_query(database_url: str, sql: str):
         conn.close()
 
 
-def add_env_flags(parser: argparse.ArgumentParser, required: bool = True):
+def add_env_flags(parser: argparse.ArgumentParser, envs: list, required: bool = True):
     group = parser.add_mutually_exclusive_group(required=required)
-    for env in ENVIRONMENTS:
+    for env in envs:
         group.add_argument(
             f"--{env}", dest=env_dest(env), action="store_true",
             help=f"connect to {env}",
@@ -190,13 +207,14 @@ def env_dest(env: str) -> str:
     return "env_" + env.replace("-", "_")
 
 
-def selected_env(args) -> str:
-    return next((e for e in ENVIRONMENTS if getattr(args, env_dest(e))), None)
+def selected_env(args, envs: list) -> str:
+    return next((e for e in envs if getattr(args, env_dest(e))), None)
 
 
 def manage_main():
     """Handle the `password` and `token` management subcommands."""
     config = load_config()
+    envs = config_environments(config)
 
     parser = argparse.ArgumentParser(
         prog="execute-db",
@@ -207,15 +225,15 @@ def manage_main():
     p_password = sub.add_parser("password", help="manage env file encryption passwords")
     pw_sub = p_password.add_subparsers(dest="action", required=True)
     p_set = pw_sub.add_parser("set", help="encrypt a plaintext .env file with a new password")
-    add_env_flags(p_set)
+    add_env_flags(p_set, envs)
     p_change = pw_sub.add_parser("change", help="change the password of an encrypted .env file")
-    add_env_flags(p_change)
+    add_env_flags(p_change, envs)
 
     args = parser.parse_args()
 
     try:
         if args.command == "password":
-            env = selected_env(args)
+            env = selected_env(args, envs)
             if args.action == "set":
                 cmd_password_set(config, env)
             else:
@@ -240,13 +258,14 @@ def exec_main():
     )
 
     config = load_config()
-    add_env_flags(parser)
+    envs = config_environments(config)
+    add_env_flags(parser, envs)
 
     parser.add_argument("sql", nargs="?", help="SQL statement to execute")
     parser.add_argument("-f", "--file", help="path to a .sql file to execute")
     args = parser.parse_args()
 
-    env = selected_env(args)
+    env = selected_env(args, envs)
     database_url = load_database_url(config, env)
 
     if args.file:
