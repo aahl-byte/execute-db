@@ -15,7 +15,7 @@ from pathlib import Path
 import psycopg2
 from dotenv import dotenv_values
 
-from . import crypto
+from . import crypto, kernel_keyring
 
 CONFIG_DIR = Path.home() / ".execute-db"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -190,6 +190,14 @@ def token_path(tid: str) -> Path:
     return EPHEMERAL_DIR / f".env.{tid}"
 
 
+def share_desc(tid: str) -> str:
+    return f"execute-db:token:{tid}"
+
+
+def token_passphrase(token: str, share: bytes) -> str:
+    return f"{token}:{share.decode()}" if share else token
+
+
 def cmd_token_create(config: dict, env: str, ttl: str):
     ttl_seconds = parse_ttl(ttl)
 
@@ -206,8 +214,15 @@ def cmd_token_create(config: dict, env: str, ttl: str):
     tid = token_id(token)
     expiry = int(time.time()) + ttl_seconds
 
+    # Bind the file to a key share that lives only in the kernel keyring with a
+    # TTL: at expiry (or reboot) the kernel destroys the share, and no copy of
+    # the file can ever be decrypted again — even by someone holding the token.
+    share = secrets.token_hex(32).encode()
+    bound = kernel_keyring.store(share_desc(tid), share, ttl_seconds + 2)
+    passphrase = token_passphrase(token, share if bound else None)
+
     EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    write_encrypted(token_path(tid), crypto.encrypt(text.encode(), token, expiry))
+    write_encrypted(token_path(tid), crypto.encrypt(text.encode(), passphrase, expiry))
 
     install_boot_sweep()
     scheduled = schedule_token_wipe(ttl_seconds)
@@ -216,6 +231,13 @@ def cmd_token_create(config: dict, env: str, ttl: str):
     print(f"  id:      {tid}")
     print(f"  env:     {env}")
     print(f"  expires: {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S} ({ttl})")
+    if bound:
+        print("  key share: in kernel keyring, self-destructs at expiry "
+              "(token will not survive a reboot)")
+    else:
+        print("  key share: UNAVAILABLE (no kernel keyring) — a copied token "
+              "file stays decryptable with the token after expiry",
+              file=sys.stderr)
     if scheduled:
         print("  auto-wipe: systemd user timer scheduled at expiry")
     else:
@@ -339,6 +361,7 @@ def cmd_token_list():
 
 def cmd_token_revoke(tid: str):
     path = token_path(tid)
+    kernel_keyring.remove(share_desc(tid))  # kill the key share regardless
     if not path.exists():
         fail(f"No token with id '{tid}' (see `execute-db token list`)")
     crypto.secure_wipe(path)
@@ -346,14 +369,20 @@ def cmd_token_revoke(tid: str):
 
 
 def load_database_url_from_token(token: str) -> str:
-    path = token_path(token_id(token))
+    tid = token_id(token)
+    path = token_path(tid)
     if not path.exists():
         fail("Unknown, expired, or revoked token")
 
+    share = kernel_keyring.read(share_desc(tid))
+
     # Decrypt first: a successful decrypt authenticates the header (incl. expiry).
     try:
-        text = crypto.decrypt(path.read_bytes(), token).decode()
+        text = crypto.decrypt(path.read_bytes(), token_passphrase(token, share)).decode()
     except crypto.DecryptionError:
+        if share is None:
+            fail("Invalid token, or its kernel key share has self-destructed "
+                 "(shares expire with the token and do not survive a reboot)")
         fail("Invalid token")
 
     expiry = crypto.expiry_of(path.read_bytes())
@@ -499,6 +528,9 @@ def manage_main():
             "protected you are prompted for its password — the token is a copy of\n"
             "the credentials re-encrypted under a fresh random secret with the\n"
             "expiry sealed into the authenticated header.\n\n"
+            "Half of the encryption key (a key share) lives only in the kernel\n"
+            "keyring with a TTL: the kernel destroys it at expiry or reboot, so\n"
+            "even a copied token file becomes permanently undecryptable.\n\n"
             "The token is printed ONCE and cannot be recovered; pass it to the\n"
             'holder, who runs:  execute-db --token <TOKEN> "SELECT ..."'
         ),

@@ -97,6 +97,16 @@ execute-db token sweep         # wipe expired token files now
 
 Creating a token requires the environment's password (if encrypted) — the token is a decrypted copy of the env, re-encrypted under a fresh random secret with the expiry sealed into the authenticated header. Expired tokens are refused and their files deleted; tampering with a token file's expiry invalidates it. TTL accepts `45s`, `30m`, `2h`, `1d` forms.
 
+### Self-destructing key material
+
+A ciphertext can't refuse to be decrypted after a deadline — anyone holding ciphertext + key can always run the math. So instead of trusting the file to disappear, half of each token's encryption key (a random **key share**) is stored *only in the kernel keyring* with a kernel-enforced TTL:
+
+- The token file is encrypted with `token + share`; the share never touches disk.
+- At expiry the **kernel destroys the share** — no user process needs to run. From that moment every copy of the token file, wherever it was taken, is permanently undecryptable, even by someone holding the token.
+- A reboot (or ending your last session) also destroys the share, so **tokens do not survive a reboot** — by design for ephemeral access.
+- `token revoke` destroys the share too, instantly deadening any copies made of the file.
+- If the kernel keyring is unavailable, `token create` falls back to token-only encryption and prints a loud warning.
+
 ### Auto-wipe at expiry
 
 Expired token files are wiped on the clock, even if `execute-db` is never run again:
@@ -114,10 +124,11 @@ What the encryption **does** protect:
 - **Credentials at rest** — encrypted `.env` and token files are AES-256-GCM ciphertext; without the password/token they are useless, including to backups, disk forensics, and anything that reads `~/.execute-db`.
 - **Non-interactive access** — password entry requires a real terminal (`/dev/tty`); a script or coding agent running as you cannot decrypt an environment or mint itself a token. The only delegated path is a token you explicitly create.
 - **Expiry, locally** — the CLI refuses expired tokens, expiry is tamper-evident (sealed into the authenticated header), and expired token files are wiped on the clock by systemd timers.
+- **Copied token files** — each token's key share lives only in the kernel keyring and self-destructs at expiry/reboot/revoke, so a copy of the token file (even together with the token) is undecryptable once the share is gone.
 
 What it **cannot** protect:
 
-- **Copy-during-validity** — expiry is enforced by *this client*. Anyone who copies a token file while holding the token has ciphertext + key and can decrypt offline forever; the expiry check in our code doesn't bind them. The same goes for the connection string itself, which any token user necessarily learns on first use.
+- **Copy-during-validity** — a same-user process acting *while a token is valid* can read the keyring share as well as the file and token, capture all three, and decrypt offline forever. And the connection string itself is necessarily revealed to any token user on first use.
 - **Root / memory** — root, debuggers, or anything that can read process memory during a run sees the decrypted URL.
 - **Disk remanence** — the overwrite-wipe is best-effort; SSD wear-leveling and copy-on-write filesystems may retain old blocks.
 
