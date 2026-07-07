@@ -131,11 +131,21 @@ def _read_tty_line(prompt: str) -> str:
 
     Uses separate read/write handles: a single r+ text stream on /dev/tty is not
     seekable, so mixing a write and a read on it raises UnsupportedOperation.
+
+    Bracketed-paste mode (left enabled by the shell) makes the terminal wrap a
+    paste in \\e[200~ ... \\e[201~ markers that get echoed on screen and left in
+    the input buffer. Disable it (\\e[?2004l) for the duration of the prompt so a
+    paste arrives as plain text; the shell re-enables it at its next prompt.
     """
     with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
+        out.write("\x1b[?2004l")   # disable bracketed paste
         out.write(prompt)
         out.flush()
-        return inp.readline()
+        try:
+            return inp.readline()
+        finally:
+            out.write("\x1b[?2004h")   # restore bracketed paste
+            out.flush()
 
 
 def prompt_line(prompt: str) -> str:
