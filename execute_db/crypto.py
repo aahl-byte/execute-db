@@ -112,17 +112,36 @@ def secure_wipe(path: Path) -> None:
     path.unlink()
 
 
+def _tty_available() -> bool:
+    try:
+        with open("/dev/tty"):
+            return True
+    except OSError:
+        return False
+
+
+def prompt_secret_line(prompt: str) -> str:
+    """Read a single non-empty secret line from the terminal (no echo).
+
+    Used for values that embed credentials (e.g. a DATABASE_URL) so they never
+    land in argv, shell history, sudo logs, or /proc/<pid>/cmdline.
+    """
+    if not _tty_available():
+        raise NoTTYError("no interactive terminal available")
+    value = getpass.getpass(prompt).strip()
+    if not value:
+        raise CryptoError("value must not be empty")
+    return value
+
+
 def prompt_password(prompt: str = "Password: ", confirm: bool = False) -> str:
     """Prompt on the controlling terminal; never read the password from stdin.
 
     stdin may be carrying piped SQL, and requiring a real terminal is what
     keeps non-interactive callers from supplying a password programmatically.
     """
-    try:
-        with open("/dev/tty"):
-            pass
-    except OSError:
-        raise NoTTYError("no interactive terminal available") from None
+    if not _tty_available():
+        raise NoTTYError("no interactive terminal available")
 
     password = getpass.getpass(prompt)
     if confirm:
