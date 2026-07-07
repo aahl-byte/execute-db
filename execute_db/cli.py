@@ -7,7 +7,7 @@ from pathlib import Path
 import psycopg2
 from dotenv import dotenv_values
 
-CONFIG_DIR = Path.home() / ".explore-db"
+CONFIG_DIR = Path.home() / ".execute-db"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 ENVIRONMENTS = ["dev", "staging", "production"]
@@ -63,33 +63,42 @@ def load_database_url(env: str) -> str:
 
 
 def run_query(database_url: str, sql: str):
-    conn = psycopg2.connect(
-        database_url,
-        sslmode="require",
-        options="-c default_transaction_read_only=on",
-    )
+    conn = psycopg2.connect(database_url, sslmode="require")
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
-            columns = [desc[0] for desc in cur.description] if cur.description else []
-            rows = cur.fetchall()
 
-            print(f"Columns: {columns}")
-            print(f"Row count: {len(rows)}")
-            result = [dict(zip(columns, row)) for row in rows]
-            print(json.dumps(result, indent=2, default=str))
+            if cur.description is not None:
+                # Statement returned a result set (SELECT, or ... RETURNING).
+                columns = [desc[0] for desc in cur.description]
+                rows = cur.fetchall()
+                print(f"Columns: {columns}")
+                print(f"Row count: {len(rows)}")
+                result = [dict(zip(columns, row)) for row in rows]
+                print(json.dumps(result, indent=2, default=str))
+            elif cur.rowcount >= 0:
+                # Write with no result set (INSERT/UPDATE/DELETE).
+                print(f"Rows affected: {cur.rowcount}")
+            else:
+                # rowcount is -1 when undefined (e.g. DDL such as CREATE/ALTER).
+                print("Statement executed.")
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="explore-db",
-        description="Run read-only SQL queries against configured databases.",
+        prog="execute-db",
+        description="Execute SQL statements against configured databases.",
         epilog='examples:\n'
-               '  explore-db --dev "SELECT 1"\n'
-               '  explore-db --dev -f query.sql\n'
-               '  explore-db --dev < query.sql',
+               '  execute-db --dev "INSERT INTO users (name) VALUES (\'Alice\')"\n'
+               '  execute-db --dev -f migration.sql\n'
+               '  execute-db --dev < migration.sql',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -97,7 +106,7 @@ def main():
     for env in ENVIRONMENTS:
         env_group.add_argument(f"--{env}", action="store_true", help=f"connect to {env}")
 
-    parser.add_argument("sql", nargs="?", help="SQL query string to execute")
+    parser.add_argument("sql", nargs="?", help="SQL statement to execute")
     parser.add_argument("-f", "--file", help="path to a .sql file to execute")
     args = parser.parse_args()
 

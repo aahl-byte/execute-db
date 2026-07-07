@@ -1,26 +1,26 @@
-# explore-db
+# execute-db
 
-A CLI tool for running **read-only** SQL queries against PostgreSQL databases across multiple environments (dev, staging, production).
+A CLI tool for executing SQL statements against PostgreSQL databases across multiple environments (dev, staging, production).
 
-Connections are enforced as read-only via `default_transaction_read_only=on`, so you can safely explore without risk of accidental writes.
+Statements run in a transaction that is **committed on success** and rolled back on error, so you can run migrations, inserts, updates, and DDL — as well as plain `SELECT`s. Handle production with care: there is no read-only guard.
 
 ## Installation
 
 Requires Python 3.9+.
 
 ```bash
-pip install git+https://github.com/aahl-byte/explore-db
+pip install git+https://github.com/aahl-byte/execute-db
 ```
 
 Or for development:
 
 ```bash
-git clone https://github.com/aahl-byte/explore-db.git && pip install -e explore-db
+git clone https://github.com/aahl-byte/execute-db.git && pip install -e execute-db
 ```
 
 ## Setup
 
-On first run, `explore-db` creates a default config directory at `~/.explore-db/` containing:
+On first run, `execute-db` creates a default config directory at `~/.execute-db/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -32,14 +32,14 @@ On first run, `explore-db` creates a default config directory at `~/.explore-db/
 To initialize manually:
 
 ```bash
-explore-db --dev "SELECT 1"
+execute-db --dev "SELECT 1"
 ```
 
 Then edit the generated files to set your actual connection strings.
 
 ### Config format
 
-`~/.explore-db/config.json` maps each environment to either a `.env` filename or a direct PostgreSQL URL:
+`~/.execute-db/config.json` maps each environment to either a `.env` filename or a direct PostgreSQL URL:
 
 ```json
 {
@@ -59,27 +59,27 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 
 Pick an environment with `--dev`, `--staging`, or `--production`, then provide SQL in one of three ways:
 
-**Inline query:**
+**Inline statement:**
 
 ```bash
-explore-db --dev "SELECT * FROM users LIMIT 10"
+execute-db --dev "INSERT INTO users (name) VALUES ('Alice')"
 ```
 
 **From a file:**
 
 ```bash
-explore-db --staging -f query.sql
+execute-db --staging -f migration.sql
 ```
 
 **Piped from stdin:**
 
 ```bash
-cat query.sql | explore-db --production
+cat migration.sql | execute-db --production
 ```
 
 ### Output
 
-Results are printed as JSON with column names and row count:
+Statements that return rows (`SELECT`, or `... RETURNING`) print the column names, row count, and rows as JSON:
 
 ```
 Columns: ['id', 'name', 'email']
@@ -96,4 +96,10 @@ Row count: 2
     "email": "bob@example.com"
   }
 ]
+```
+
+Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print the affected row count:
+
+```
+Rows affected: 1
 ```
