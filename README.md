@@ -117,6 +117,31 @@ Expired token files are wiped on the clock, even if `execute-db` is never run ag
 
 Wipes use the same best-effort overwrite-then-delete as `password set`. If you want sweeps to run even while you're logged out, enable lingering: `loginctl enable-linger $USER`.
 
+## Hardened install (privilege separation)
+
+Everything above runs as *you*, so another process running under your account — a script, a coding agent — can, while a token is valid, read the secret files, read the kernel keyring share, or even edit the CLI code you type your password into. Client-side crypto can't beat a same-user adversary.
+
+The hardened install closes that gap by moving secrets and the CLI under a dedicated service user:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh | sudo bash
+```
+
+(Pin to a commit you trust with `... | sudo bash -s -- --ref <sha>`; the install runs `pip` as root against that ref.)
+
+What it sets up:
+
+- A system user **`executedb`** owns `/var/lib/execute-db/.execute-db` (mode `0700`). Your encrypted envs and tokens move there — **unreadable to your own account**.
+- A **root-owned frozen copy** of the CLI at `/usr/local/lib/execute-db/venv` — your account can't patch the code that handles your password.
+- A locked-down **sudoers** rule lets you run *only* that binary as `executedb` (`env_reset`, no `PYTHONPATH`/`LD_*` passthrough).
+- Decryption and the DB connection happen inside the `executedb` process, whose memory your account cannot ptrace.
+
+In this mode the CLI **requires every environment to be encrypted** (a plaintext env would have no password gate), refuses `-f` (pipe SQL via stdin instead), caps token TTLs at 24h, and anchors keyring shares in `executedb`'s persistent keyring. Tokens still work for delegation — an agent you hand a token can run its queries — but can no longer copy the file or read the share.
+
+> **Use the trusted path.** To keep an agent from capturing your password as you type it, always invoke `/usr/local/bin/execute-db` (or a root-owned shell alias), **not** whatever `execute-db` your `PATH` resolves — `PATH` is yours to shadow, so the tool can't guarantee it for you. The auto-redirect (via a marker file) is a convenience, not a security boundary.
+
+Reverse it any time: `sudo ./install.sh --uninstall` (or re-download and run with `--uninstall`), which restores the store to your home directory.
+
 ## Threat model
 
 What the encryption **does** protect:
@@ -126,13 +151,18 @@ What the encryption **does** protect:
 - **Expiry, locally** — the CLI refuses expired tokens, expiry is tamper-evident (sealed into the authenticated header), and expired token files are wiped on the clock by systemd timers.
 - **Copied token files** — each token's key share lives only in the kernel keyring and self-destructs at expiry/reboot/revoke, so a copy of the token file (even together with the token) is undecryptable once the share is gone.
 
+With the [hardened install](#hardened-install-privilege-separation), the same-user process is additionally blocked from reading the secret files, reading the keyring share, and tampering with the CLI code — those move to a separate user your account can't touch.
+
 What it **cannot** protect:
 
-- **Copy-during-validity** — a same-user process acting *while a token is valid* can read the keyring share as well as the file and token, capture all three, and decrypt offline forever. And the connection string itself is necessarily revealed to any token user on first use.
+- **Copy-during-validity** *(without the hardened install)* — a same-user process acting *while a token is valid* can read the keyring share as well as the file and token, capture all three, and decrypt offline forever. Privilege separation closes this; the plain install does not.
+- **A legitimately-held token, during its life** — an agent you gave a token to can run that environment's queries and exfiltrate results until the token expires. That's the delegation working as intended.
+- **Password capture in your own session** — anything that can read your terminal (a keylogger inside your session, injected shell hooks) can capture the password as you type it. A hardware factor (yubikey — a planned addition) is the answer there.
 - **Root / memory** — root, debuggers, or anything that can read process memory during a run sees the decrypted URL.
 - **Disk remanence** — the overwrite-wipe is best-effort; SSD wear-leveling and copy-on-write filesystems may retain old blocks.
+- **Installer trust-on-first-use** — `curl | sudo bash` trusts the repo the first time; pin `--ref` to a reviewed commit and protect the repo.
 
-Client-side crypto fundamentally cannot revoke knowledge. To *actually* cut off exposed credentials, act server-side: rotate the database password, or issue databases roles with `VALID UNTIL` so the server itself refuses logins after a deadline.
+Client-side crypto fundamentally cannot revoke knowledge. To *actually* cut off exposed credentials, act server-side: rotate the database password, or issue database roles with `VALID UNTIL` so the server itself refuses logins after a deadline.
 
 ## Usage
 
