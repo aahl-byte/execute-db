@@ -53,22 +53,35 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 EPHEMERAL_DIR = CONFIG_DIR / ".ephemeral"
 SYSTEM_MARKER = Path.home() / ".execute-db" / "SYSTEM"  # redirect hint (user side)
 
-DEFAULT_ENVIRONMENTS = ["dev", "staging", "production"]
-
-# Environments are defined by config.json keys; each key becomes an --<env> flag.
+# Environments are the `.env.<alias>` files in CONFIG_DIR; each becomes an
+# --<alias> flag. There is no config.json index.
 ENV_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-RESERVED_NAMES = {"password", "token", "file", "f", "help", "sql"}
+RESERVED_NAMES = {"password", "token", "config", "file", "f", "help", "sql"}
 
 
-def config_environments(config: dict) -> list:
+def discover_envs() -> list:
+    """Environments are the `.env.<alias>` files in CONFIG_DIR (no config.json).
+
+    The alias is the filename suffix. Files may be plaintext (plain install) or
+    encrypted; `.tmp` writes, the `.ephemeral` token dir, and any leftover
+    `config.json` are ignored.
+    """
+    if not CONFIG_DIR.is_dir():
+        return []
     envs = []
-    for name in config:
-        if name in RESERVED_NAMES or not ENV_NAME_RE.match(name):
-            print(f"Ignoring invalid environment name in {CONFIG_FILE}: {name!r}", file=sys.stderr)
+    for p in sorted(CONFIG_DIR.glob(".env.*")):
+        if p.name.endswith(".tmp") or not p.is_file():
             continue
-        envs.append(name)
-    if not envs:
-        fail(f"No valid environments defined in {CONFIG_FILE}")
+        alias = p.name[len(".env."):]
+        if alias in RESERVED_NAMES or not ENV_NAME_RE.match(alias):
+            print(f"Ignoring invalid environment file {p.name} in {CONFIG_DIR}",
+                  file=sys.stderr)
+            continue
+        envs.append(alias)
+    if CONFIG_FILE.exists():
+        print(f"Note: {CONFIG_FILE} is no longer used; environments are read from "
+              f".env.* files. A direct-URL env must be recreated with "
+              f"`execute-db config set <name>`.", file=sys.stderr)
     return envs
 
 
@@ -77,37 +90,8 @@ def fail(message: str):
     sys.exit(1)
 
 
-def init_config():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    CONFIG_FILE.write_text(json.dumps(
-        {e: f".env.{e}" for e in DEFAULT_ENVIRONMENTS}, indent=2,
-    ) + "\n")
-
-    for env in DEFAULT_ENVIRONMENTS:
-        env_file = CONFIG_DIR / f".env.{env}"
-        env_file.write_text(f"DATABASE_URL=postgresql://user:password@host:5432/dbname\n")
-
-    print(f"Created default config at: {CONFIG_DIR}")
-    print(f"Update your connection strings before running queries:")
-    print(f"  {CONFIG_FILE}")
-    for env in DEFAULT_ENVIRONMENTS:
-        print(f"  {CONFIG_DIR / f'.env.{env}'}")
-    sys.exit(0)
-
-
-def load_config() -> dict:
-    if not CONFIG_FILE.exists():
-        init_config()
-    return json.loads(CONFIG_FILE.read_text())
-
-
-def env_file_path(config: dict, env: str):
-    """Return the env's .env file path, or None if configured as a direct URL."""
-    entry = config[env]
-    if entry.startswith("postgresql://") or entry.startswith("postgres://"):
-        return None
-    return CONFIG_DIR / entry
+def env_file_path(env: str) -> Path:
+    return CONFIG_DIR / f".env.{env}"
 
 
 def require_encrypted(env: str):
@@ -147,21 +131,12 @@ def url_from_env_text(text: str, source) -> str:
     return url
 
 
-def load_database_url(config: dict, env: str) -> str:
-    if env not in config:
-        fail(f"Environment '{env}' not found in {CONFIG_FILE}")
-
-    env_path = env_file_path(config, env)
-
-    # Support direct URL string or .env filename
-    if env_path is None:
-        require_encrypted(env)  # direct URLs have no password gate
-        return config[env]
-
-    if not env_path.exists():
-        fail(f"Env file not found: {env_path}")
-
-    return url_from_env_text(read_env_text(env, env_path), env_path)
+def load_database_url(env: str) -> str:
+    path = env_file_path(env)
+    if not path.exists():
+        fail(f"Environment '{env}' not found (looked for {path}). "
+             f"Create it with `execute-db config set {env}`.")
+    return url_from_env_text(read_env_text(env, path), path)
 
 
 def write_encrypted(path: Path, blob: bytes):
@@ -172,10 +147,8 @@ def write_encrypted(path: Path, blob: bytes):
     tmp.replace(path)
 
 
-def cmd_password_set(config: dict, env: str):
-    path = env_file_path(config, env)
-    if path is None:
-        fail(f"'{env}' is a direct URL in {CONFIG_FILE}; move it into a .env file to encrypt it")
+def cmd_password_set(env: str):
+    path = env_file_path(env)
     if not path.exists():
         fail(f"Env file not found: {path}")
     if crypto.is_encrypted(path):
@@ -194,10 +167,8 @@ def cmd_password_set(config: dict, env: str):
     print("If you forget the password, delete the file and recreate it — there is no recovery.")
 
 
-def cmd_password_change(config: dict, env: str):
-    path = env_file_path(config, env)
-    if path is None:
-        fail(f"'{env}' is a direct URL in {CONFIG_FILE}; nothing to change")
+def cmd_password_change(env: str):
+    path = env_file_path(env)
     if not path.exists():
         fail(f"Env file not found: {path}")
     if not crypto.is_encrypted(path):
@@ -255,18 +226,14 @@ def token_passphrase(token: str, share: bytes) -> str:
     return f"{token}:{share.decode()}" if share else token
 
 
-def cmd_token_create(config: dict, env: str, ttl: str):
+def cmd_token_create(env: str, ttl: str):
     ttl_seconds = parse_ttl(ttl)
 
     # Decrypt (or read) the source env; this is where the password gate applies.
-    path = env_file_path(config, env)
-    if path is None:
-        require_encrypted(env)  # direct URLs have no password gate
-        text = f"DATABASE_URL={config[env]}\n"
-    else:
-        if not path.exists():
-            fail(f"Env file not found: {path}")
-        text = read_env_text(env, path)
+    path = env_file_path(env)
+    if not path.exists():
+        fail(f"Env file not found: {path}")
+    text = read_env_text(env, path)
 
     token = secrets.token_urlsafe(16)
     tid = token_id(token)
@@ -488,23 +455,21 @@ def run_query(database_url: str, sql: str):
         conn.close()
 
 
-def env_flag_help(config: dict, env: str) -> str:
+def env_flag_help(env: str) -> str:
     """Describe an env flag, marking how the environment is stored."""
-    path = env_file_path(config, env)
-    if path is None:
-        return f"the '{env}' environment (plaintext URL in config.json)"
+    path = env_file_path(env)
     if crypto.is_encrypted(path):
         return f"the '{env}' environment (password protected)"
     return f"the '{env}' environment (plaintext {path.name})"
 
 
-def add_env_flags(parser: argparse.ArgumentParser, envs: list, config: dict,
+def add_env_flags(parser: argparse.ArgumentParser, envs: list,
                   required: bool = True):
     group = parser.add_mutually_exclusive_group(required=required)
     for env in envs:
         group.add_argument(
             f"--{env}", dest=env_dest(env), action="store_true",
-            help=env_flag_help(config, env),
+            help=env_flag_help(env),
         )
     return group
 
@@ -519,8 +484,10 @@ def selected_env(args, envs: list) -> str:
 
 def manage_main():
     """Handle the `password` and `token` management subcommands."""
-    config = load_config()
-    envs = config_environments(config)
+    envs = discover_envs()
+    if not envs:
+        fail("No environments configured. Create one with "
+             "`execute-db config set <name>`.")
 
     raw = argparse.RawDescriptionHelpFormatter
     parser = argparse.ArgumentParser(
@@ -562,7 +529,7 @@ def manage_main():
         ),
         formatter_class=raw,
     )
-    add_env_flags(p_set, envs, config)
+    add_env_flags(p_set, envs)
     p_change = pw_sub.add_parser(
         "change",
         help="change the password of an encrypted .env file",
@@ -572,7 +539,7 @@ def manage_main():
         ),
         formatter_class=raw,
     )
-    add_env_flags(p_change, envs, config)
+    add_env_flags(p_change, envs)
 
     p_token = sub.add_parser(
         "token",
@@ -602,7 +569,7 @@ def manage_main():
         ),
         formatter_class=raw,
     )
-    add_env_flags(p_create, envs, config)
+    add_env_flags(p_create, envs)
     p_create.add_argument("--ttl", required=True, metavar="DURATION",
                           help="token lifetime: <n>s|m|h|d, e.g. 45s, 30m, 2h, 1d")
     tok_sub.add_parser(
@@ -639,12 +606,12 @@ def manage_main():
         if args.command == "password":
             env = selected_env(args, envs)
             if args.action == "set":
-                cmd_password_set(config, env)
+                cmd_password_set(env)
             else:
-                cmd_password_change(config, env)
+                cmd_password_change(env)
         elif args.command == "token":
             if args.action == "create":
-                cmd_token_create(config, selected_env(args, envs), args.ttl)
+                cmd_token_create(selected_env(args, envs), args.ttl)
             elif args.action == "list":
                 cmd_token_list()
             elif args.action == "sweep":
@@ -663,8 +630,8 @@ def exec_main():
         description=(
             "Execute SQL statements against configured databases.\n\n"
             "Statements run in a single transaction: committed on success, rolled\n"
-            f"back on error. Environments are the keys of {CONFIG_FILE};\n"
-            "each key becomes an --<env> flag. Password-protected environments\n"
+            "back on error. Each environment is a .env.<name> file in the store;\n"
+            "each becomes an --<name> flag. Password-protected environments\n"
             "prompt for their password on the terminal."
         ),
         epilog='examples:\n'
@@ -682,9 +649,11 @@ def exec_main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    config = load_config()
-    envs = config_environments(config)
-    group = add_env_flags(parser, envs, config)
+    envs = discover_envs()
+    if not envs:
+        fail("No environments configured. Create one with "
+             "`execute-db config set <name>`.")
+    group = add_env_flags(parser, envs)
     group.add_argument("--token", metavar="TOKEN",
                        help="connect with an ephemeral access token instead of an "
                             "environment (no password prompt; see `execute-db token --help`)")
@@ -699,7 +668,7 @@ def exec_main():
         database_url = load_database_url_from_token(args.token)
     else:
         env = selected_env(args, envs)
-        database_url = load_database_url(config, env)
+        database_url = load_database_url(env)
 
     if args.file:
         # The trusted launcher converts -f into piped stdin *as the calling
