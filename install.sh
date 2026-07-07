@@ -102,11 +102,12 @@ do_uninstall() {
 # early pre-flight validation and the actual copy so both agree on what moves.
 _each_store_file() {
     local src="$1" fn="$2" entry base nlink
-    for entry in "$src"/* "$src"/.env* "$src"/config.json; do
+    for entry in "$src"/* "$src"/.env*; do
         [ -e "$entry" ] || continue
         base="$(basename "$entry")"
         case "$base" in
             SYSTEM|.ephemeral) continue ;;   # marker / uid-bound tokens: don't migrate
+            config.json) continue ;;         # legacy index, no longer used
             *.tmp) continue ;;
         esac
         # Reject anything that isn't a plain regular file (symlink/fifo/dir/dev):
