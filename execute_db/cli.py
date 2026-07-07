@@ -4,6 +4,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -207,28 +209,127 @@ def cmd_token_create(config: dict, env: str, ttl: str):
     EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     write_encrypted(token_path(tid), crypto.encrypt(text.encode(), token, expiry))
 
+    install_boot_sweep()
+    scheduled = schedule_token_wipe(ttl_seconds)
+
     print(f"Token: {token}")
     print(f"  id:      {tid}")
     print(f"  env:     {env}")
     print(f"  expires: {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S} ({ttl})")
+    if scheduled:
+        print("  auto-wipe: systemd user timer scheduled at expiry")
+    else:
+        print("  auto-wipe: could not schedule a systemd user timer — the file "
+              "will only be wiped on the next execute-db run after expiry",
+              file=sys.stderr)
     print(f'Use it with: execute-db --token {token} "SELECT ..."')
     print("This token is shown once and cannot be recovered.")
 
 
-def cmd_token_list():
+def sweep_expired_tokens(verbose: bool = False) -> list:
+    """Best-effort wipe of expired token files; returns the wiped ids.
+
+    Called by the systemd timers, by `token sweep`/`token list`, and silently
+    on every CLI run as a backstop. Never raises.
+    """
+    wiped = []
+    if not EPHEMERAL_DIR.is_dir():
+        return wiped
     now = time.time()
+    for p in sorted(EPHEMERAL_DIR.glob(".env.*")):
+        try:
+            expiry = crypto.expiry_of(p.read_bytes())
+        except (crypto.NotEncryptedError, OSError):
+            continue
+        if expiry and expiry < now:
+            try:
+                crypto.secure_wipe(p)
+            except OSError:
+                continue
+            wiped.append(p.name.removeprefix(".env."))
+    if verbose:
+        for tid in wiped:
+            print(f"wiped expired token {tid}", file=sys.stderr)
+    return wiped
+
+
+def cli_binary():
+    """Absolute path to the execute-db entry point, for systemd units."""
+    candidate = Path(sys.executable).with_name("execute-db")
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("execute-db")
+
+
+def schedule_token_wipe(ttl_seconds: int) -> bool:
+    """Schedule a transient one-shot systemd user timer to sweep at expiry.
+
+    HOME is pinned so the sweep targets the same config dir that created the
+    token. Transient timers do not survive a reboot; install_boot_sweep()
+    covers that gap.
+    """
+    exe = cli_binary()
+    if not exe or not shutil.which("systemd-run"):
+        return False
+    cmd = [
+        "systemd-run", "--user", "--collect", "--quiet",
+        f"--on-active={ttl_seconds + 2}",
+        "--timer-property=AccuracySec=1s",
+        f"--setenv=HOME={Path.home()}",
+        exe, "token", "sweep",
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def install_boot_sweep():
+    """Install a persistent user timer that sweeps shortly after each boot/login.
+
+    Catches token files whose transient wipe timer was lost to a reboot.
+    Written once; failures are silent (schedule_token_wipe reports the
+    user-visible outcome).
+    """
+    exe = cli_binary()
+    if not exe or not shutil.which("systemctl"):
+        return
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    service = unit_dir / "execute-db-token-sweep.service"
+    timer = unit_dir / "execute-db-token-sweep.timer"
+    if service.exists() and timer.exists():
+        return
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    service.write_text(
+        "[Unit]\n"
+        "Description=Wipe expired execute-db ephemeral tokens\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={exe} token sweep\n"
+    )
+    timer.write_text(
+        "[Unit]\n"
+        "Description=Wipe expired execute-db ephemeral tokens after startup\n\n"
+        "[Timer]\n"
+        "OnStartupSec=2min\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    for args in (["daemon-reload"], ["enable", "--now", timer.name]):
+        subprocess.run(["systemctl", "--user", *args], capture_output=True)
+
+
+def cmd_token_list():
+    sweep_expired_tokens(verbose=True)
     active = []
     if EPHEMERAL_DIR.is_dir():
         for p in sorted(EPHEMERAL_DIR.glob(".env.*")):
             try:
                 expiry = crypto.expiry_of(p.read_bytes())
-            except crypto.NotEncryptedError:
+            except (crypto.NotEncryptedError, OSError):
                 continue
-            if expiry and expiry < now:
-                p.unlink()
-                print(f"purged expired token {p.name.removeprefix('.env.')}", file=sys.stderr)
-            else:
-                active.append((p.name.removeprefix(".env."), expiry))
+            active.append((p.name.removeprefix(".env."), expiry))
     if not active:
         print("No active tokens.")
         return
@@ -240,7 +341,7 @@ def cmd_token_revoke(tid: str):
     path = token_path(tid)
     if not path.exists():
         fail(f"No token with id '{tid}' (see `execute-db token list`)")
-    path.unlink()
+    crypto.secure_wipe(path)
     print(f"Revoked token {tid}")
 
 
@@ -257,7 +358,7 @@ def load_database_url_from_token(token: str) -> str:
 
     expiry = crypto.expiry_of(path.read_bytes())
     if expiry and expiry < time.time():
-        path.unlink()
+        crypto.secure_wipe(path)
         fail("Token expired (removed)")
 
     return url_from_env_text(text, path)
@@ -422,6 +523,17 @@ def manage_main():
         description="Delete a token so it stops working immediately.",
     )
     p_revoke.add_argument("id", help="token id, as shown by `execute-db token list`")
+    tok_sub.add_parser(
+        "sweep",
+        help="wipe expired token files now",
+        description=(
+            "Wipe any expired token files. Runs automatically via systemd user\n"
+            "timers (scheduled at each token's expiry, plus once after boot) and\n"
+            "as a backstop on every execute-db invocation, so you rarely need to\n"
+            "run it by hand."
+        ),
+        formatter_class=raw,
+    )
 
     args = parser.parse_args()
 
@@ -437,6 +549,8 @@ def manage_main():
                 cmd_token_create(config, selected_env(args, envs), args.ttl)
             elif args.action == "list":
                 cmd_token_list()
+            elif args.action == "sweep":
+                sweep_expired_tokens(verbose=True)
             else:
                 cmd_token_revoke(args.id)
     except crypto.NoTTYError:
@@ -506,6 +620,15 @@ def exec_main():
 
 
 def main():
+    # Backstop: the systemd timers do the wall-clock wiping, but sweep here too
+    # in case they were unavailable. Skip for `token` commands, which sweep for
+    # themselves (verbosely). Never let this break the actual command.
+    if len(sys.argv) <= 1 or sys.argv[1] != "token":
+        try:
+            sweep_expired_tokens()
+        except Exception:
+            pass
+
     if len(sys.argv) > 1 and sys.argv[1] in ("password", "token"):
         manage_main()
     else:

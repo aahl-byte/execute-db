@@ -90,11 +90,24 @@ execute-db token create --dev --ttl 2h
 
 execute-db --token 8YOfCttjVdI5FdUfB-X6Vw "SELECT 1"   # no tty, no password needed
 
-execute-db token list          # active tokens (purges expired ones)
+execute-db token list          # active tokens (wipes expired ones)
 execute-db token revoke <id>   # revoke early
+execute-db token sweep         # wipe expired token files now
 ```
 
 Creating a token requires the environment's password (if encrypted) — the token is a decrypted copy of the env, re-encrypted under a fresh random secret with the expiry sealed into the authenticated header. Expired tokens are refused and their files deleted; tampering with a token file's expiry invalidates it. TTL accepts `45s`, `30m`, `2h`, `1d` forms.
+
+### Auto-wipe at expiry
+
+Expired token files are wiped on the clock, even if `execute-db` is never run again:
+
+- `token create` schedules a **transient systemd user timer** that wipes the file right at expiry.
+- A persistent user timer (`execute-db-token-sweep.timer`, installed on first token creation) sweeps leftovers ~2 minutes after each boot/login, catching transient timers lost to a reboot.
+- As a backstop, every `execute-db` invocation silently sweeps expired files (in case systemd was unavailable — token creation warns when the timer couldn't be scheduled).
+
+Wipes use the same best-effort overwrite-then-delete as `password set`. If you want sweeps to run even while you're logged out, enable lingering: `loginctl enable-linger $USER`.
+
+**Caveat:** expiry cannot be enforced against a holder who *copied* the token file while it was valid — they hold both the ciphertext and the key (and saw the connection string on first use). Auto-wipe closes the "file lingers on disk, decrypt later" window; truly revoking exposed credentials means rotating the database password.
 
 ## Usage
 
