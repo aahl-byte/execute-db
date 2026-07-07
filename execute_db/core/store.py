@@ -1,19 +1,48 @@
-"""Environment files: discovery, decryption, and loading the DATABASE_URL.
+"""The on-disk environment store: layout, discovery, and reading.
 
-Each environment is a `.env.<alias>` file in the store (see paths.py). Files may
-be plaintext (plain install) or encrypted; loading one applies the password gate
-when it is encrypted.
+Each environment is a `.env.<alias>` file in CONFIG_DIR; each becomes an
+`--<alias>` flag. There is no config.json index. This module is pure logic — it
+returns values or raises/`fail`s; it does not format command output.
 """
 
+import os
+import pwd
+import re
 import sys
 from io import StringIO
 from pathlib import Path
 
 from dotenv import dotenv_values
 
-from . import crypto, paths, system
-from .paths import ENV_NAME_RE, RESERVED_NAMES, env_file_path
-from .util import fail
+from . import crypto, system
+from ..console import fail
+
+
+def _resolve_config_dir() -> Path:
+    # In system mode derive the home from the running uid's passwd entry, NOT
+    # from $HOME: an attacker who calls the sudo rule directly without -H could
+    # otherwise point CONFIG_DIR (and thus config.json) at a dir they control.
+    if system.in_system_mode():
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".execute-db"
+    return Path.home() / ".execute-db"
+
+
+CONFIG_DIR = _resolve_config_dir()
+CONFIG_FILE = CONFIG_DIR / "config.json"
+EPHEMERAL_DIR = CONFIG_DIR / ".ephemeral"
+
+ENV_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+RESERVED_NAMES = {"password", "token", "config", "file", "f", "help", "sql"}
+
+
+def env_file_path(env: str) -> Path:
+    return CONFIG_DIR / f".env.{env}"
+
+
+def validate_alias(alias: str):
+    if alias in RESERVED_NAMES or not ENV_NAME_RE.match(alias):
+        fail(f"Invalid environment name {alias!r} "
+             f"(must match {ENV_NAME_RE.pattern} and not be reserved)")
 
 
 def discover_envs() -> list:
@@ -23,20 +52,20 @@ def discover_envs() -> list:
     encrypted; `.tmp` writes, the `.ephemeral` token dir, and any leftover
     `config.json` are ignored.
     """
-    if not paths.CONFIG_DIR.is_dir():
+    if not CONFIG_DIR.is_dir():
         return []
     envs = []
-    for p in sorted(paths.CONFIG_DIR.glob(".env.*")):
+    for p in sorted(CONFIG_DIR.glob(".env.*")):
         if p.name.endswith(".tmp") or not p.is_file():
             continue
         alias = p.name[len(".env."):]
         if alias in RESERVED_NAMES or not ENV_NAME_RE.match(alias):
-            print(f"Ignoring invalid environment file {p.name} in {paths.CONFIG_DIR}",
+            print(f"Ignoring invalid environment file {p.name} in {CONFIG_DIR}",
                   file=sys.stderr)
             continue
         envs.append(alias)
-    if paths.CONFIG_FILE.exists():
-        print(f"Note: {paths.CONFIG_FILE} is no longer used; environments are read from "
+    if CONFIG_FILE.exists():
+        print(f"Note: {CONFIG_FILE} is no longer used; environments are read from "
               f".env.* files. A direct-URL env must be recreated with "
               f"`execute-db config set <name>`.", file=sys.stderr)
     return envs
@@ -93,11 +122,3 @@ def write_encrypted(path: Path, blob: bytes):
     tmp.write_bytes(blob)
     tmp.chmod(0o600)
     tmp.replace(path)
-
-
-def env_flag_help(env: str) -> str:
-    """Describe an env flag, marking how the environment is stored."""
-    path = env_file_path(env)
-    if crypto.is_encrypted(path):
-        return f"the '{env}' environment (password protected)"
-    return f"the '{env}' environment (plaintext {path.name})"

@@ -4,6 +4,9 @@ A token is a copy of an environment's credentials re-encrypted under a fresh
 random secret with the expiry sealed into the authenticated header. Half of the
 key (a key share) lives only in the kernel keyring with a TTL, so at expiry (or
 reboot) the share self-destructs and the token file becomes undecryptable.
+
+Pure logic: the create/list/sweep/revoke functions return data (or wiped ids);
+the command layer formats the reports and warnings for the terminal.
 """
 
 import hashlib
@@ -13,18 +16,27 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import crypto, kernel_keyring, paths, system
-from .envs import read_env_text, url_from_env_text, write_encrypted
-from .paths import env_file_path
-from .util import fail
+from . import crypto, keyring, store, system
+from ..console import fail
 
 TTL_RE = re.compile(r"^(\d+)([smhd])$")
 TTL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 TOKEN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+@dataclass
+class TokenResult:
+    token: str
+    tid: str
+    env: str
+    expiry: int
+    ttl: str
+    bound: bool       # key share stored in the kernel keyring?
+    scheduled: bool   # systemd user timer scheduled to wipe at expiry?
 
 
 def parse_ttl(text: str) -> int:
@@ -50,7 +62,7 @@ def token_path(tid: str) -> Path:
     # cannot escape the ephemeral dir and wipe an arbitrary file.
     if not TOKEN_ID_RE.match(tid):
         fail(f"Invalid token id {tid!r}")
-    return paths.EPHEMERAL_DIR / f".env.{tid}"
+    return store.EPHEMERAL_DIR / f".env.{tid}"
 
 
 def share_desc(tid: str) -> str:
@@ -134,14 +146,17 @@ def install_boot_sweep():
         subprocess.run(["systemctl", "--user", *args], capture_output=True)
 
 
-def cmd_token_create(env: str, ttl: str):
+def create_token(env: str, ttl: str) -> TokenResult:
+    """Mint a token for `env`, persist the encrypted snapshot, and schedule its
+    wipe. Prompts for the env password if it is encrypted. Returns the details
+    for the caller to report; does not print."""
     ttl_seconds = parse_ttl(ttl)
 
     # Decrypt (or read) the source env; this is where the password gate applies.
-    path = env_file_path(env)
+    path = store.env_file_path(env)
     if not path.exists():
         fail(f"Env file not found: {path}")
-    text = read_env_text(env, path)
+    text = store.read_env_text(env, path)
 
     token = secrets.token_urlsafe(16)
     tid = token_id(token)
@@ -151,48 +166,31 @@ def cmd_token_create(env: str, ttl: str):
     # TTL: at expiry (or reboot) the kernel destroys the share, and no copy of
     # the file can ever be decrypted again — even by someone holding the token.
     share = secrets.token_hex(32).encode()
-    bound = kernel_keyring.store(share_desc(tid), share, ttl_seconds + 2,
-                                 persistent=system.in_system_mode())
+    bound = keyring.store(share_desc(tid), share, ttl_seconds + 2,
+                          persistent=system.in_system_mode())
     passphrase = token_passphrase(token, share if bound else None)
 
-    paths.EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    write_encrypted(token_path(tid), crypto.encrypt(text.encode(), passphrase, expiry))
+    store.EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store.write_encrypted(token_path(tid), crypto.encrypt(text.encode(), passphrase, expiry))
 
     install_boot_sweep()
     scheduled = schedule_token_wipe(ttl_seconds)
 
-    print(f"Token: {token}")
-    print(f"  id:      {tid}")
-    print(f"  env:     {env}")
-    print(f"  expires: {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S} ({ttl})")
-    if bound:
-        print("  key share: in kernel keyring, self-destructs at expiry "
-              "(token will not survive a reboot)")
-    else:
-        print("  key share: UNAVAILABLE (no kernel keyring) — a copied token "
-              "file stays decryptable with the token after expiry",
-              file=sys.stderr)
-    if scheduled:
-        print("  auto-wipe: systemd user timer scheduled at expiry")
-    else:
-        print("  auto-wipe: could not schedule a systemd user timer — the file "
-              "will only be wiped on the next execute-db run after expiry",
-              file=sys.stderr)
-    print(f'Use it with: execute-db --token {token} "SELECT ..."')
-    print("This token is shown once and cannot be recovered.")
+    return TokenResult(token=token, tid=tid, env=env, expiry=expiry, ttl=ttl,
+                       bound=bound, scheduled=scheduled)
 
 
-def sweep_expired_tokens(verbose: bool = False) -> list:
+def sweep_expired() -> list:
     """Best-effort wipe of expired token files; returns the wiped ids.
 
     Called by the systemd timers, by `token sweep`/`token list`, and silently
     on every CLI run as a backstop. Never raises.
     """
     wiped = []
-    if not paths.EPHEMERAL_DIR.is_dir():
+    if not store.EPHEMERAL_DIR.is_dir():
         return wiped
     now = time.time()
-    for p in sorted(paths.EPHEMERAL_DIR.glob(".env.*")):
+    for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
         try:
             expiry = crypto.expiry_of(p.read_bytes())
         except (crypto.NotEncryptedError, OSError):
@@ -203,37 +201,33 @@ def sweep_expired_tokens(verbose: bool = False) -> list:
             except OSError:
                 continue
             wiped.append(p.name.removeprefix(".env."))
-    if verbose:
-        for tid in wiped:
-            print(f"wiped expired token {tid}", file=sys.stderr)
     return wiped
 
 
-def cmd_token_list():
-    sweep_expired_tokens(verbose=True)
+def list_active() -> list:
+    """Return [(tid, expiry), ...] for the token files currently on disk."""
     active = []
-    if paths.EPHEMERAL_DIR.is_dir():
-        for p in sorted(paths.EPHEMERAL_DIR.glob(".env.*")):
+    if store.EPHEMERAL_DIR.is_dir():
+        for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
             try:
                 expiry = crypto.expiry_of(p.read_bytes())
             except (crypto.NotEncryptedError, OSError):
                 continue
             active.append((p.name.removeprefix(".env."), expiry))
-    if not active:
-        print("No active tokens.")
-        return
-    for tid, expiry in active:
-        print(f"{tid}  expires {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S}")
+    return active
 
 
-def cmd_token_revoke(tid: str):
+def revoke_token(tid: str) -> bool:
+    """Kill a token's key share and wipe its file. Returns True if a token file
+    existed (and was wiped), False if there was none. The share is removed
+    either way."""
     path = token_path(tid)
     # kill the key share regardless
-    kernel_keyring.remove(share_desc(tid), persistent=system.in_system_mode())
+    keyring.remove(share_desc(tid), persistent=system.in_system_mode())
     if not path.exists():
-        fail(f"No token with id '{tid}' (see `execute-db token list`)")
+        return False
     crypto.secure_wipe(path)
-    print(f"Revoked token {tid}")
+    return True
 
 
 def load_database_url_from_token(token: str) -> str:
@@ -242,7 +236,7 @@ def load_database_url_from_token(token: str) -> str:
     if not path.exists():
         fail("Unknown, expired, or revoked token")
 
-    share = kernel_keyring.read(share_desc(tid), persistent=system.in_system_mode())
+    share = keyring.read(share_desc(tid), persistent=system.in_system_mode())
 
     # Decrypt first: a successful decrypt authenticates the header (incl. expiry).
     try:
@@ -258,7 +252,7 @@ def load_database_url_from_token(token: str) -> str:
         crypto.secure_wipe(path)
         fail("Token expired (removed)")
 
-    return url_from_env_text(text, path)
+    return store.url_from_env_text(text, path)
 
 
 def revoke_all_tokens() -> int:
@@ -268,13 +262,13 @@ def revoke_all_tokens() -> int:
     removing one environment can't target 'its' tokens; we revoke all of them.
     Best-effort per token so one failure doesn't strand the rest.
     """
-    if not paths.EPHEMERAL_DIR.is_dir():
+    if not store.EPHEMERAL_DIR.is_dir():
         return 0
     count = 0
-    for p in sorted(paths.EPHEMERAL_DIR.glob(".env.*")):
+    for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
         tid = p.name.removeprefix(".env.")
         try:
-            kernel_keyring.remove(share_desc(tid), persistent=system.in_system_mode())
+            keyring.remove(share_desc(tid), persistent=system.in_system_mode())
         except Exception:
             pass
         try:
