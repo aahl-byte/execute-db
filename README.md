@@ -36,58 +36,44 @@ curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.s
 ```
 
 
-### create config
+### create an environment
 
 see [setup](#setup)
 
-### encrypting environment configs
-
-``` bash
-execute-db password set --dev # repeat for every environment
-```
-
 ## Setup
 
-On first run, `execute-db` creates a default config directory at `~/.execute-db/` containing:
-
-| File | Purpose |
-|------|---------|
-| `config.json` | Maps environment names to `.env` files (or direct connection strings) |
-| `.env.dev` | Dev database connection |
-| `.env.staging` | Staging database connection |
-| `.env.production` | Production database connection |
-
-To initialize manually:
+Create an environment with `execute-db config set <name>` — it prompts for the connection URL and a password, then writes an encrypted `~/.execute-db/.env.<name>`:
 
 ```bash
-execute-db --dev "SELECT 1"
+execute-db config set dev        # prompts for the connection URL, then a password
+execute-db --dev "SELECT 1"      # prompts: Password for 'dev':
 ```
 
-Then edit the generated files to set your actual connection strings.
+There is no `config.json` and no manual editing: an environment simply *is* a `.env.<name>` file in `~/.execute-db/`, and each is encrypted at rest from the moment `config set` creates it.
 
 ### Config format
 
-`~/.execute-db/config.json` maps each environment to either a `.env` filename or a direct PostgreSQL URL:
-
-```json
-{
-  "dev": ".env.dev",
-  "staging": ".env.staging",
-  "production": "postgresql://user:password@host:5432/dbname"
-}
-```
-
-Each `.env` file should contain a `DATABASE_URL` variable:
+Each environment is one encrypted `~/.execute-db/.env.<name>` file. Decrypted, it holds a single `DATABASE_URL`:
 
 ```
 DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
+The URL is only ever entered at the `config set` prompt (never as a command-line argument, where it would leak via shell history, `/proc`, and sudo logs). Names must match `[A-Za-z][A-Za-z0-9_-]*`; reserved names (`token`, `config`, `file`, `f`, `sql`, `help`, `password`) are rejected.
+
+### Managing environments
+
+```bash
+execute-db config list          # show environments and whether each is encrypted
+execute-db config set <name>    # create/replace: prompts for URL + password
+execute-db config rm <name>     # remove it and revoke outstanding tokens
+```
+
+`config set` doubles as create, edit-URL, and password reset: it always re-prompts for the URL and a new password and writes fresh ciphertext, so forgetting a password just means running it again. `config rm` securely wipes the file and revokes **all** outstanding tokens (token files carry no environment identity, so a per-environment revoke isn't possible) — to fully cut off a removed environment, rotate its database password server-side.
+
 ### Dynamic environments
 
-Environments are not fixed — **every key in `config.json` becomes a `--<name>` flag**. Add an entry like `"dev_alt_db": ".env.dev_alt_db"` and `execute-db --dev_alt_db ...` works immediately. Use this to give the same database different access types, or to reach databases beyond the default trio.
-
-Names must match `[A-Za-z][A-Za-z0-9_-]*`; reserved names (`token`, `file`, `f`, `sql`, `help`, `password`) are ignored with a warning.
+Environments are not fixed — **every `.env.<name>` file in the store becomes a `--<name>` flag**. Run `execute-db config set dev_alt_db` and `execute-db --dev_alt_db ...` works immediately. Use this to give the same database different access types, or to reach databases beyond the usual dev/staging/production trio.
 
 ## Usage
 
@@ -128,10 +114,10 @@ execute-db password change --dev    # rotate: old password, then new
 
 Details:
 
+- Environments created with `config set` are encrypted from the start; `password set`/`change` exist to encrypt or rotate the password of a `.env` file directly.
 - Files are encrypted with AES-256-GCM using a scrypt-derived key. After encryption the plaintext original is overwritten and deleted (**best-effort** — on SSDs and copy-on-write filesystems the old blocks may physically survive).
 - Password prompts read from the terminal (`/dev/tty`), never from stdin — piped SQL can't be mistaken for a password, and a non-interactive caller gets a hard error pointing at ephemeral tokens instead. There is no environment-variable or flag to supply the password programmatically.
-- **Forgot the password?** There is no recovery. Delete the encrypted file, recreate it with your connection string, and `password set` again.
-- Environments configured as a direct URL in `config.json` can't be encrypted — move the URL into a `.env` file first.
+- **Forgot the password?** There is no recovery. Run `execute-db config set <name>` again to overwrite the environment with a fresh URL and password.
 
 ## Ephemeral tokens
 
@@ -183,7 +169,7 @@ curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.s
 
 Re-running the command upgrades in place; pass `--ref` again to move to a newer reviewed commit. **What it sets up:**
 
-- A system user **`executedb`** owns `/var/lib/execute-db/.execute-db` (mode `0700`). Your encrypted envs and tokens move there — **unreadable to your own account**.
+- A system user **`executedb`** owns `/var/lib/execute-db/.execute-db` (mode `0700`). Your encrypted envs and tokens move there — **unreadable to your own account**. Manage them in place with `execute-db config set`/`rm` (the launcher runs the command as `executedb`); no installer re-run is needed to add or change an environment.
 - A **root-owned frozen copy** of the CLI at `/usr/local/lib/execute-db/venv` — your account can't patch the code that handles your password.
 - A locked-down **sudoers** rule lets you run *only* that binary as `executedb` (`env_reset`, no `PYTHONPATH`/`LD_*` passthrough).
 - Decryption and the DB connection happen inside the `executedb` process, whose memory your account cannot ptrace.
