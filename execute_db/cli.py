@@ -1,8 +1,12 @@
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
+import time
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
@@ -13,6 +17,7 @@ from . import crypto
 
 CONFIG_DIR = Path.home() / ".execute-db"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+EPHEMERAL_DIR = CONFIG_DIR / ".ephemeral"
 
 DEFAULT_ENVIRONMENTS = ["dev", "staging", "production"]
 
@@ -164,6 +169,100 @@ def cmd_password_change(config: dict, env: str):
     print(f"Password changed for {path}")
 
 
+TTL_RE = re.compile(r"^(\d+)([smhd])$")
+TTL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_ttl(text: str) -> int:
+    m = TTL_RE.match(text)
+    if not m:
+        fail(f"Invalid --ttl {text!r} (use e.g. 45s, 30m, 2h, 1d)")
+    return int(m.group(1)) * TTL_UNITS[m.group(2)]
+
+
+def token_id(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+def token_path(tid: str) -> Path:
+    return EPHEMERAL_DIR / f".env.{tid}"
+
+
+def cmd_token_create(config: dict, env: str, ttl: str):
+    ttl_seconds = parse_ttl(ttl)
+
+    # Decrypt (or read) the source env; this is where the password gate applies.
+    path = env_file_path(config, env)
+    if path is None:
+        text = f"DATABASE_URL={config[env]}\n"
+    else:
+        if not path.exists():
+            fail(f"Env file not found: {path}")
+        text = read_env_text(env, path)
+
+    token = secrets.token_urlsafe(16)
+    tid = token_id(token)
+    expiry = int(time.time()) + ttl_seconds
+
+    EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_encrypted(token_path(tid), crypto.encrypt(text.encode(), token, expiry))
+
+    print(f"Token: {token}")
+    print(f"  id:      {tid}")
+    print(f"  env:     {env}")
+    print(f"  expires: {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S} ({ttl})")
+    print(f'Use it with: execute-db --token {token} "SELECT ..."')
+    print("This token is shown once and cannot be recovered.")
+
+
+def cmd_token_list():
+    now = time.time()
+    active = []
+    if EPHEMERAL_DIR.is_dir():
+        for p in sorted(EPHEMERAL_DIR.glob(".env.*")):
+            try:
+                expiry = crypto.expiry_of(p.read_bytes())
+            except crypto.NotEncryptedError:
+                continue
+            if expiry and expiry < now:
+                p.unlink()
+                print(f"purged expired token {p.name.removeprefix('.env.')}", file=sys.stderr)
+            else:
+                active.append((p.name.removeprefix(".env."), expiry))
+    if not active:
+        print("No active tokens.")
+        return
+    for tid, expiry in active:
+        print(f"{tid}  expires {datetime.fromtimestamp(expiry):%Y-%m-%d %H:%M:%S}")
+
+
+def cmd_token_revoke(tid: str):
+    path = token_path(tid)
+    if not path.exists():
+        fail(f"No token with id '{tid}' (see `execute-db token list`)")
+    path.unlink()
+    print(f"Revoked token {tid}")
+
+
+def load_database_url_from_token(token: str) -> str:
+    path = token_path(token_id(token))
+    if not path.exists():
+        fail("Unknown, expired, or revoked token")
+
+    # Decrypt first: a successful decrypt authenticates the header (incl. expiry).
+    try:
+        text = crypto.decrypt(path.read_bytes(), token).decode()
+    except crypto.DecryptionError:
+        fail("Invalid token")
+
+    expiry = crypto.expiry_of(path.read_bytes())
+    if expiry and expiry < time.time():
+        path.unlink()
+        fail("Token expired (removed)")
+
+    return url_from_env_text(text, path)
+
+
 def run_query(database_url: str, sql: str):
     conn = psycopg2.connect(database_url, sslmode="require")
     try:
@@ -229,6 +328,15 @@ def manage_main():
     p_change = pw_sub.add_parser("change", help="change the password of an encrypted .env file")
     add_env_flags(p_change, envs)
 
+    p_token = sub.add_parser("token", help="manage ephemeral access tokens")
+    tok_sub = p_token.add_subparsers(dest="action", required=True)
+    p_create = tok_sub.add_parser("create", help="create a short-lived token for an environment")
+    add_env_flags(p_create, envs)
+    p_create.add_argument("--ttl", required=True, help="token lifetime, e.g. 30m, 2h, 1d")
+    tok_sub.add_parser("list", help="list active tokens (purges expired ones)")
+    p_revoke = tok_sub.add_parser("revoke", help="revoke a token by id")
+    p_revoke.add_argument("id", help="token id (from `token list`)")
+
     args = parser.parse_args()
 
     try:
@@ -238,6 +346,13 @@ def manage_main():
                 cmd_password_set(config, env)
             else:
                 cmd_password_change(config, env)
+        elif args.command == "token":
+            if args.action == "create":
+                cmd_token_create(config, selected_env(args, envs), args.ttl)
+            elif args.action == "list":
+                cmd_token_list()
+            else:
+                cmd_token_revoke(args.id)
     except crypto.NoTTYError:
         fail("This command needs an interactive terminal to prompt for a password.")
     except crypto.CryptoError as e:
@@ -253,20 +368,26 @@ def exec_main():
                '  execute-db --dev -f migration.sql\n'
                '  execute-db --dev < migration.sql\n'
                '  execute-db password set --dev\n'
-               '  execute-db password change --dev',
+               '  execute-db password change --dev\n'
+               '  execute-db token create --dev --ttl 2h\n'
+               '  execute-db --token TOKEN "SELECT 1"',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     config = load_config()
     envs = config_environments(config)
-    add_env_flags(parser, envs)
+    group = add_env_flags(parser, envs)
+    group.add_argument("--token", metavar="TOKEN", help="connect with an ephemeral access token")
 
     parser.add_argument("sql", nargs="?", help="SQL statement to execute")
     parser.add_argument("-f", "--file", help="path to a .sql file to execute")
     args = parser.parse_args()
 
-    env = selected_env(args, envs)
-    database_url = load_database_url(config, env)
+    if args.token:
+        database_url = load_database_url_from_token(args.token)
+    else:
+        env = selected_env(args, envs)
+        database_url = load_database_url(config, env)
 
     if args.file:
         sql = Path(args.file).read_text()
