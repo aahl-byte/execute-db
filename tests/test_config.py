@@ -1,6 +1,6 @@
 import pytest
 
-from execute_db import cli, crypto
+from execute_db import cli, config_cmd, crypto, paths, system
 
 
 # --- prompt_line -------------------------------------------------------------
@@ -53,7 +53,7 @@ def test_config_list_empty(store, capsys):
 def test_config_set_creates_encrypted_env(store, monkeypatch):
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://u:p@h/db")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "hunter2")
-    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
+    monkeypatch.setattr(config_cmd, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
 
     path = store / ".env.dev"
@@ -68,12 +68,12 @@ def test_config_set_creates_encrypted_env(store, monkeypatch):
 def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
     # No `store` fixture: the store dir does not exist yet (fresh machine).
     d = tmp_path / ".execute-db"
-    monkeypatch.setattr(cli, "CONFIG_DIR", d)
-    monkeypatch.setattr(cli, "CONFIG_FILE", d / "config.json")
-    monkeypatch.setattr(cli, "in_system_mode", lambda: False)
+    monkeypatch.setattr(paths, "CONFIG_DIR", d)
+    monkeypatch.setattr(paths, "CONFIG_FILE", d / "config.json")
+    monkeypatch.setattr(system, "in_system_mode", lambda: False)
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://x")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
-    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
+    monkeypatch.setattr(config_cmd, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
     assert (d / ".env.dev").exists()
     assert oct(d.stat().st_mode)[-3:] == "700"
@@ -83,7 +83,7 @@ def test_config_set_replaces_existing(store, monkeypatch):
     (store / ".env.dev").write_bytes(b"old")
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://new")
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
-    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
+    monkeypatch.setattr(config_cmd, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
 
@@ -92,7 +92,7 @@ def test_config_set_reprompts_on_bad_url(store, monkeypatch, capsys):
     urls = iter(["mysql://x", "postgresql://ok"])
     monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
-    monkeypatch.setattr(cli, "prompt_confirm", lambda q: True)
+    monkeypatch.setattr(config_cmd, "prompt_confirm", lambda q: True)
     cli.cmd_config_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
     assert "must start with postgresql" in capsys.readouterr().err
@@ -103,7 +103,7 @@ def test_config_set_reprompts_when_preview_declined(store, monkeypatch):
     confirms = iter([False, True])
     monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
     monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
-    monkeypatch.setattr(cli, "prompt_confirm", lambda q: next(confirms))
+    monkeypatch.setattr(config_cmd, "prompt_confirm", lambda q: next(confirms))
     cli.cmd_config_set("dev")
     text = crypto.decrypt((store / ".env.dev").read_bytes(), "pw").decode()
     assert "postgresql://right" in text
