@@ -276,7 +276,8 @@ def cmd_token_create(config: dict, env: str, ttl: str):
     # TTL: at expiry (or reboot) the kernel destroys the share, and no copy of
     # the file can ever be decrypted again — even by someone holding the token.
     share = secrets.token_hex(32).encode()
-    bound = kernel_keyring.store(share_desc(tid), share, ttl_seconds + 2)
+    bound = kernel_keyring.store(share_desc(tid), share, ttl_seconds + 2,
+                                 persistent=in_system_mode())
     passphrase = token_passphrase(token, share if bound else None)
 
     EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -425,7 +426,8 @@ def cmd_token_list():
 
 def cmd_token_revoke(tid: str):
     path = token_path(tid)
-    kernel_keyring.remove(share_desc(tid))  # kill the key share regardless
+    # kill the key share regardless
+    kernel_keyring.remove(share_desc(tid), persistent=in_system_mode())
     if not path.exists():
         fail(f"No token with id '{tid}' (see `execute-db token list`)")
     crypto.secure_wipe(path)
@@ -438,7 +440,7 @@ def load_database_url_from_token(token: str) -> str:
     if not path.exists():
         fail("Unknown, expired, or revoked token")
 
-    share = kernel_keyring.read(share_desc(tid))
+    share = kernel_keyring.read(share_desc(tid), persistent=in_system_mode())
 
     # Decrypt first: a successful decrypt authenticates the header (incl. expiry).
     try:
