@@ -107,7 +107,21 @@ Expired token files are wiped on the clock, even if `execute-db` is never run ag
 
 Wipes use the same best-effort overwrite-then-delete as `password set`. If you want sweeps to run even while you're logged out, enable lingering: `loginctl enable-linger $USER`.
 
-**Caveat:** expiry cannot be enforced against a holder who *copied* the token file while it was valid — they hold both the ciphertext and the key (and saw the connection string on first use). Auto-wipe closes the "file lingers on disk, decrypt later" window; truly revoking exposed credentials means rotating the database password.
+## Threat model
+
+What the encryption **does** protect:
+
+- **Credentials at rest** — encrypted `.env` and token files are AES-256-GCM ciphertext; without the password/token they are useless, including to backups, disk forensics, and anything that reads `~/.execute-db`.
+- **Non-interactive access** — password entry requires a real terminal (`/dev/tty`); a script or coding agent running as you cannot decrypt an environment or mint itself a token. The only delegated path is a token you explicitly create.
+- **Expiry, locally** — the CLI refuses expired tokens, expiry is tamper-evident (sealed into the authenticated header), and expired token files are wiped on the clock by systemd timers.
+
+What it **cannot** protect:
+
+- **Copy-during-validity** — expiry is enforced by *this client*. Anyone who copies a token file while holding the token has ciphertext + key and can decrypt offline forever; the expiry check in our code doesn't bind them. The same goes for the connection string itself, which any token user necessarily learns on first use.
+- **Root / memory** — root, debuggers, or anything that can read process memory during a run sees the decrypted URL.
+- **Disk remanence** — the overwrite-wipe is best-effort; SSD wear-leveling and copy-on-write filesystems may retain old blocks.
+
+Client-side crypto fundamentally cannot revoke knowledge. To *actually* cut off exposed credentials, act server-side: rotate the database password, or issue databases roles with `VALID UNTIL` so the server itself refuses logins after a deadline.
 
 ## Usage
 
