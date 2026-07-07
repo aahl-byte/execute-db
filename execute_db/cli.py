@@ -16,7 +16,7 @@ from pathlib import Path
 import psycopg2
 from dotenv import dotenv_values
 
-from . import crypto, kernel_keyring
+from . import __version__, crypto, kernel_keyring
 
 # --- privilege separation (system mode) ---------------------------------------
 # When installed hardened, secrets live under a dedicated service user and the
@@ -823,12 +823,55 @@ def maybe_redirect_to_launcher():
         os.execv(LAUNCHER, [LAUNCHER, *sys.argv[1:]])
 
 
+TOP_LEVEL_HELP = """\
+execute-db {version} — run SQL against configured PostgreSQL environments
+
+Run SQL:
+  execute-db --<env> "SELECT 1"          run a statement against an environment
+  execute-db --<env> -f migration.sql    run SQL from a file
+  cat q.sql | execute-db --<env>          run SQL piped on stdin
+  execute-db --token <TOKEN> "SELECT 1"   run with an ephemeral token
+
+Manage environments (each is an encrypted .env.<name> file in ~/.execute-db):
+  execute-db config list                 list environments and their state
+  execute-db config set <name>           create/replace one (prompts for URL + password)
+  execute-db config rm <name>            remove one and revoke outstanding tokens
+
+Password protection:
+  execute-db password set --<env>        encrypt an environment with a password
+  execute-db password change --<env>     rotate an environment's password
+
+Ephemeral tokens (temporary password-free access):
+  execute-db token create --<env> --ttl 2h   mint a short-lived token
+  execute-db token list                       list active tokens
+  execute-db token revoke <id>                revoke a token early
+
+  execute-db --version                   print the version
+  execute-db <command> --help            detailed help for a command
+"""
+
+
+def print_top_level_help():
+    print(TOP_LEVEL_HELP.format(version=__version__))
+
+
 def main():
     maybe_redirect_to_launcher()
 
+    argv = sys.argv[1:]
+
+    # Top-level help / version: handle before any store access so they work even
+    # with no environments configured (exec_main would otherwise error first).
+    if not argv or argv[0] in ("-h", "--help"):
+        print_top_level_help()
+        return
+    if argv[0] in ("-V", "--version", "version"):
+        print(f"execute-db {__version__}")
+        return
+
     # `config` manages the store in place (and must work with zero envs), so it
     # runs after the launcher redirect but before the env-flag-building paths.
-    if len(sys.argv) > 1 and sys.argv[1] == "config":
+    if argv[0] == "config":
         config_main()
         return
 
