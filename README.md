@@ -10,17 +10,29 @@ Connection credentials can be **password-encrypted at rest**: an encrypted envir
 
 Requires Python 3.9+.
 
+**The recommended install is [hardened (privilege separation)](#hardened-install-privilege-separation).** On any machine where other processes run as you — coding agents especially — it's the only setup that stops them reading your credentials or tampering with the CLI you type your password into. The three steps:
+
 ```bash
+# 1. get the CLI
 pip install git+https://github.com/aahl-byte/execute-db
+
+# 2. configure and ENCRYPT each environment (see Setup + Password protection below)
+execute-db --dev "SELECT 1"          # writes ~/.execute-db, then edit the connection strings
+execute-db password set --dev        # repeat for every environment
+
+# 3. harden — move secrets + a frozen CLI under a dedicated service user
+curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh \
+  | sudo bash -s -- --ref <commit-sha>
 ```
 
-Or for development:
+See [Hardened install](#hardened-install-privilege-separation) for what step 3 sets up and why to pin `--ref`.
+
+**Lightweight install (single-user / trusted machine only).** If nothing untrusted runs under your account, you can stop after steps 1–2 and skip hardening — credentials stay encrypted at rest, but a same-user process could read the key material while a token is live.
 
 ```bash
+# development checkout
 git clone https://github.com/aahl-byte/execute-db.git && pip install -e execute-db
 ```
-
-> Running alongside coding agents or other untrusted same-user processes? Use the [hardened install](#hardened-install-privilege-separation) instead — it moves your credentials and the CLI under a dedicated user so they can't be read or tampered with.
 
 ## Setup
 
