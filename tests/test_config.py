@@ -175,6 +175,18 @@ def test_config_run_lists(store, capsys):
     assert "dev" in capsys.readouterr().out
 
 
+# --- plaintext envs are allowed, even hardened ------------------------------
+
+def test_plaintext_env_is_readable_in_system_mode(store, monkeypatch):
+    # Hardened mode no longer requires encryption: a plaintext env reads back
+    # without a password prompt (the file itself is protected by the service user).
+    path = store / ".env.dev"
+    path.write_bytes(b"DATABASE_URL=postgresql://x\n")
+    monkeypatch.setattr(system, "in_system_mode", lambda: True)
+    assert store_mod.read_env_text("dev", path) == "DATABASE_URL=postgresql://x\n"
+    assert store_mod.load_database_url("dev") == "postgresql://x"
+
+
 # --- empty-store onboarding --------------------------------------------------
 
 def test_exec_empty_store_guides_user(store, capsys):

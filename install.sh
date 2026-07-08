@@ -38,12 +38,23 @@ LIB_DIR="/usr/local/lib/db-cli"   # shared, root-owned venv hosting both scripts
 VENV="${LIB_DIR}/venv"
 UNIT_DIR="/etc/systemd/system"
 
-# REPO is overridable (EXECUTE_DB_REPO) only to allow install testing against a
-# local checkout; the default is the canonical public repo.
+# Where to pip-install the package from, in priority order:
+#   1. EXECUTE_DB_REPO set          -> git+${EXECUTE_DB_REPO}@${REF}
+#   2. run from a local checkout    -> that directory (local testing/dev)
+#   3. otherwise                    -> the canonical public repo (curl|bash)
+# Pin a trusted commit SHA with --ref/EXECUTE_DB_REF for the git paths; the
+# default branch is trust-on-upgrade.
+REPO_EXPLICIT="${EXECUTE_DB_REPO:-}"
 REPO="${EXECUTE_DB_REPO:-https://github.com/aahl-byte/execute-db}"
-# Pin to a trusted commit SHA. Override with --ref or EXECUTE_DB_REF. Default is
-# a branch (trust-on-upgrade); pinning a SHA is strongly recommended.
 REF="${EXECUTE_DB_REF:-main}"
+
+# Detect a local checkout: only when this script is a real file (not curl|bash)
+# sitting next to a pyproject.toml.
+LOCAL_SRC=""
+if [ -f "$0" ]; then
+    _self_dir="$(cd "$(dirname "$0")" && pwd)"
+    [ -f "${_self_dir}/pyproject.toml" ] && LOCAL_SRC="$_self_dir"
+fi
 
 MODE="install"
 TARGET_USER="${SUDO_USER:-}"
@@ -109,16 +120,9 @@ _each_store_file() {
         fi
         nlink="$(stat -c '%h' "$entry")"
         [ "$nlink" -eq 1 ] || die "refusing to migrate hard-linked file: ${entry}"
-        # Every .env* must be encrypted (magic 'EXDB1'); system mode has no
-        # password gate for plaintext, so refuse to complete otherwise.
-        case "$base" in
-            .env|.env.*)
-                local magic
-                magic="$(head -c5 "$entry" 2>/dev/null || true)"
-                [ "$magic" = "EXDB1" ] || die \
-                    "environment file ${base} is not encrypted. Encrypt it first: ${CUR_APP} password set --${base#.env.}"
-                ;;
-        esac
+        # Plaintext and encrypted envs are both allowed. A plaintext env has no
+        # per-use password gate even under hardening; encrypt it with
+        # `${CUR_APP} password set --<name>` if you want one.
         "$fn" "$entry" "$base"
     done
 }
@@ -294,8 +298,9 @@ capture your password:
 Because the stores are separate, an explore-db (read-only) token is NOT accepted
 by execute-db — read-only access you delegate cannot be escalated to writes.
 
-Each tool keeps its own environments (hardened mode refuses plaintext, so give a
-password at 'config set'):
+Each tool keeps its own environments. A password at 'config set' is optional
+(encrypts the env for a per-use password gate); plaintext envs work too and run
+without a prompt:
 
   $(app_launcher execute-db) config set prod
   $(app_launcher explore-db) config set prod
@@ -321,12 +326,21 @@ do_install() {
         validate_store "${uhome}/.${name}"
     done
 
-    info "Installing frozen CLIs into ${VENV} (ref: ${REF})"
+    local source
+    if [ -n "$REPO_EXPLICIT" ]; then
+        source="git+${REPO}@${REF}"
+    elif [ -n "$LOCAL_SRC" ]; then
+        source="$LOCAL_SRC"
+    else
+        source="git+${REPO}@${REF}"
+    fi
+
+    info "Installing frozen CLIs into ${VENV} (source: ${source})"
     rm -rf "$LIB_DIR"
     install -d -m 0755 "$LIB_DIR"
     python3 -m venv "$VENV"
     "${VENV}/bin/pip" install --quiet --upgrade pip
-    "${VENV}/bin/pip" install --quiet "git+${REPO}@${REF}"
+    "${VENV}/bin/pip" install --quiet "$source"
     # Root-owned, not writable by anyone else — this is the code-tamper defense.
     chown -R root:root "$LIB_DIR"
     chmod -R go-w "$LIB_DIR"
