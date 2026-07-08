@@ -6,6 +6,8 @@ the result for the terminal.
 """
 
 import argparse
+import csv
+import io
 import json
 import sys
 from pathlib import Path
@@ -49,19 +51,84 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
                         help="SQL statement to execute (omit to read from -f FILE or stdin)")
     parser.add_argument("-f", "--file", metavar="FILE",
                         help="read the SQL to execute from a .sql file")
+    parser.add_argument("-o", "--format", choices=FORMATS, default="table",
+                        help="output format for result rows (default: table)")
+    parser.add_argument("--meta", action="store_true",
+                        help="print a row-count/columns summary to stderr")
     return parser
 
 
-def _print_result(result: query.QueryResult):
+FORMATS = ("table", "json", "jsonl", "csv", "list")
+
+
+def _cell(value) -> str:
+    """Render one cell for the text formats (table/csv/list).
+
+    NULL is shown literally so it is distinguishable from an empty string;
+    dicts/lists (jsonb, arrays) are JSON-encoded so nested data round-trips;
+    everything else (datetimes, numbers, ...) coerces via str().
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
+def _format_table(columns: list, rows: list) -> str:
+    cells = [[_cell(v) for v in row] for row in rows]
+    widths = [len(c) for c in columns]
+    for row in cells:
+        for i, c in enumerate(row):
+            widths[i] = max(widths[i], len(c))
+
+    def line(values):
+        return " | ".join(v.ljust(widths[i]) for i, v in enumerate(values))
+
+    out = [line(columns), "-+-".join("-" * w for w in widths)]
+    out += [line(row) for row in cells]
+    return "\n".join(out)
+
+
+def format_result(result: query.QueryResult, fmt: str) -> str:
+    """Format a result's *data* for stdout. Non-row kinds carry no data ("")."""
+    if result.kind != "rows":
+        return ""
+
+    columns, rows = result.columns, result.rows
+    if fmt == "json":
+        objs = [dict(zip(columns, row)) for row in rows]
+        return json.dumps(objs, indent=2, default=str)
+    if fmt == "jsonl":
+        return "\n".join(
+            json.dumps(dict(zip(columns, row)), default=str) for row in rows
+        )
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerows([_cell(v) for v in row] for row in rows)
+        return buf.getvalue().rstrip("\n")
+    if fmt == "list":
+        return "\n".join("\t".join(_cell(v) for v in row) for row in rows)
+    return _format_table(columns, rows)
+
+
+def _print_result(result: query.QueryResult, fmt: str = "table", meta: bool = False):
+    # stdout carries result data only; status/metadata go to stderr so piped
+    # output (csv/json/...) stays clean.
     if result.kind == "rows":
-        print(f"Columns: {result.columns}")
-        print(f"Row count: {len(result.rows)}")
-        rows = [dict(zip(result.columns, row)) for row in result.rows]
-        print(json.dumps(rows, indent=2, default=str))
+        data = format_result(result, fmt)
+        if data:
+            print(data)
+        if meta:
+            n = len(result.rows)
+            print(f"{n} row{'' if n == 1 else 's'}, "
+                  f"columns: {', '.join(result.columns)}", file=sys.stderr)
     elif result.kind == "count":
-        print(f"Rows affected: {result.rowcount}")
+        print(f"Rows affected: {result.rowcount}", file=sys.stderr)
     else:
-        print("Statement executed.")
+        print("Statement executed.", file=sys.stderr)
 
 
 def run(argv: list):
@@ -94,7 +161,7 @@ def run(argv: list):
         parser.error("provide SQL as an argument, via -f FILE, or pipe to stdin")
 
     try:
-        _print_result(query.run_query(database_url, sql))
+        _print_result(query.run_query(database_url, sql), args.format, args.meta)
     except Exception as e:
         # In system mode the agent sees this over sudo; psycopg2 errors can echo
         # host/user/dbname. Keep the detail for interactive user-mode debugging.

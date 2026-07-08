@@ -85,18 +85,38 @@ execute-db --staging -f migration.sql
 cat migration.sql | execute-db --production
 ```
 
-Statements that return rows (`SELECT`, or `... RETURNING`) print the column names, row count, and rows as JSON:
+Statements that return rows (`SELECT`, or `... RETURNING`) print an aligned table by default:
 
 ```
-Columns: ['id', 'name', 'email']
-Row count: 2
-[
-  { "id": 1, "name": "Alice", "email": "alice@example.com" },
-  { "id": 2, "name": "Bob",   "email": "bob@example.com" }
-]
+id | name  | email
+-+---+------+------------------
+1  | Alice | alice@example.com
+2  | Bob   | bob@example.com
 ```
 
-Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print the affected row count instead:
+### Output formats
+
+Use `-o`/`--format` to pick how result rows are rendered:
+
+| format | description |
+| --- | --- |
+| `table` | aligned columns (default) — readable at a terminal |
+| `json` | pretty-printed array of objects |
+| `jsonl` | one JSON object per line — good for streaming/piping |
+| `csv` | RFC-4180 CSV with a header row |
+| `list` | one row per line, columns tab-separated (bare values when single-column) |
+
+```bash
+execute-db --dev -o csv   "SELECT id, email FROM users" > users.csv
+execute-db --dev -o jsonl "SELECT * FROM events"        | jq .
+execute-db --dev -o list  "SELECT email FROM users"     # one email per line
+```
+
+**stdout carries result data only.** Status and metadata go to stderr, so piped output stays clean. Pass `--meta` to print a `2 rows, columns: id, name` summary to stderr for row-returning queries.
+
+`NULL` is rendered literally (distinct from an empty string) in the text formats; JSON cell values (`jsonb`, arrays) are JSON-encoded.
+
+Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print their outcome to **stderr** (nothing to stdout):
 
 ```
 Rows affected: 1
