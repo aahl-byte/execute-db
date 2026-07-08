@@ -2,12 +2,13 @@
 
 A CLI tool for executing SQL statements against PostgreSQL databases across multiple environments (dev, staging, production, or any others you define).
 
-Statements run in a transaction that is **committed on success** and rolled back on error, so you can run migrations, inserts, updates, and DDL — as well as plain `SELECT`s. Handle production with care: there is no read-only guard.
+Statements run in a transaction that is **committed on success** and rolled back on error, so you can run migrations, inserts, updates, and DDL — as well as plain `SELECT`s. Handle production with care: `execute-db` has no read-only guard. If you only need to read, use its read-only sibling **[`explore-db`](#explore-db-read-only-sibling)**, which runs every query in a read-only transaction so the server rejects any write.
 
-Connection credentials can be **password-encrypted at rest**: an encrypted environment can only be used by entering its password on an interactive terminal, or via a short-lived [ephemeral token](#ephemeral-tokens). This keeps non-interactive callers (scripts, coding agents) from reading your connection strings or executing queries without your say-so.
+Connection credentials can optionally be **password-encrypted at rest**: an encrypted environment can only be used by entering its password on an interactive terminal, or via a short-lived [ephemeral token](#ephemeral-tokens). This keeps non-interactive callers (scripts, coding agents) from reading your connection strings or executing queries without your say-so.
 
 **Contents:** 
 - [Installation](#installation) 
+- [explore-db (read-only sibling)](#explore-db-read-only-sibling) 
 - [Setup](#setup) 
 - [Usage](#usage) 
 - [Password protection](#password-protection) 
@@ -40,20 +41,39 @@ curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.s
 
 see [setup](#setup)
 
-## Setup
+## explore-db (read-only sibling)
 
-Create an environment with `execute-db config set <name>` — it prompts for the connection URL and a password, then writes an encrypted `~/.execute-db/.env.<name>`:
+Installing this package provides **two** console scripts from one shared engine:
+
+| CLI | Transactions | Config directory |
+| --- | --- | --- |
+| `execute-db` | read/write (commit on success) | `~/.execute-db/` |
+| `explore-db` | **read-only** (server rejects writes) | `~/.explore-db/` |
+
+`explore-db` is byte-for-byte the same tool as `execute-db` — same commands (`config`, `password`, `token`), same flags, same output formats — with exactly two differences: every query runs in a `default_transaction_read_only=on` transaction (so `INSERT`/`UPDATE`/`DELETE`/DDL fail at the server, not by SQL parsing), and it keeps its **own** environment store in `~/.explore-db/`. The separate store is deliberate: it means `execute-db` can never reach a passwordless environment you created only for read-only exploration.
 
 ```bash
-execute-db config set dev        # prompts for the connection URL, then a password
-execute-db --dev "SELECT 1"      # prompts: Password for 'dev':
+explore-db config set analytics   # prompts for URL + optional password
+explore-db --analytics "SELECT count(*) FROM events"
+explore-db --analytics "DELETE FROM events"   # error: cannot execute DELETE in a read-only transaction
 ```
 
-There is no `config.json` and no manual editing: an environment simply *is* a `.env.<name>` file in `~/.execute-db/`, and each is encrypted at rest from the moment `config set` creates it.
+Everything below applies to both CLIs; substitute `explore-db` and `~/.explore-db/` where relevant.
+
+## Setup
+
+Create an environment with `execute-db config set <name>` — it prompts for the connection URL and an **optional** password, then writes `~/.execute-db/.env.<name>` (encrypted if you gave a password, plaintext if you left it blank):
+
+```bash
+execute-db config set dev        # prompts for the connection URL, then an optional password
+execute-db --dev "SELECT 1"      # prompts: Password for 'dev':  (only if encrypted)
+```
+
+There is no `config.json` and no manual editing: an environment simply *is* a `.env.<name>` file in `~/.execute-db/`. Give a password at `config set` to encrypt it at rest, or leave it blank for a plaintext file; add or rotate a password later with [`password set`/`password change`](#password-protection).
 
 ### Config format
 
-Each environment is one encrypted `~/.execute-db/.env.<name>` file. Decrypted, it holds a single `DATABASE_URL`:
+Each environment is one `~/.execute-db/.env.<name>` file — encrypted, or plaintext when you skip the password. Its contents (decrypted, if encrypted) hold a single `DATABASE_URL`:
 
 ```
 DATABASE_URL=postgresql://user:password@host:5432/dbname
@@ -65,11 +85,11 @@ The URL is only ever entered at the `config set` prompt (never as a command-line
 
 ```bash
 execute-db config list          # show environments and whether each is encrypted
-execute-db config set <name>    # create/replace: prompts for URL + password
+execute-db config set <name>    # create/replace: prompts for URL + optional password
 execute-db config rm <name>     # remove it and revoke outstanding tokens
 ```
 
-`config set` doubles as create, edit-URL, and password reset: it always re-prompts for the URL and a new password and writes fresh ciphertext, so forgetting a password just means running it again. `config rm` securely wipes the file and revokes **all** outstanding tokens (token files carry no environment identity, so a per-environment revoke isn't possible) — to fully cut off a removed environment, rotate its database password server-side.
+`config set` doubles as create, edit-URL, and password reset: it always re-prompts for the URL and an optional new password and writes a fresh file, so forgetting a password just means running it again (leave the password blank to drop encryption). `config rm` securely wipes the file and revokes **all** outstanding tokens (token files carry no environment identity, so a per-environment revoke isn't possible) — to fully cut off a removed environment, rotate its database password server-side.
 
 ### Dynamic environments
 
@@ -138,7 +158,7 @@ execute-db password change --dev    # rotate: old password, then new
 
 Details:
 
-- Environments created with `config set` are encrypted from the start; `password set`/`change` exist to encrypt or rotate the password of a `.env` file directly.
+- Environments created with `config set` are encrypted when you supply a password (leave it blank for plaintext); `password set`/`change` exist to encrypt or rotate the password of an existing `.env` file directly.
 - Files are encrypted with AES-256-GCM using a scrypt-derived key. After encryption the plaintext original is overwritten and deleted (**best-effort** — on SSDs and copy-on-write filesystems the old blocks may physically survive).
 - Password prompts read from the terminal (`/dev/tty`), never from stdin — piped SQL can't be mistaken for a password, and a non-interactive caller gets a hard error pointing at ephemeral tokens instead. There is no environment-variable or flag to supply the password programmatically.
 - **Forgot the password?** There is no recovery. Run `execute-db config set <name>` again to overwrite the environment with a fresh URL and password.
