@@ -101,16 +101,20 @@ Use `-o`/`--format` to pick how result rows are rendered:
 | format | description |
 | --- | --- |
 | `table` | aligned columns (default) — readable at a terminal |
+| `vertical` | one `column`/`value` block per row (like psql's `\x`) — best for wide rows on a narrow terminal |
 | `json` | pretty-printed array of objects |
 | `jsonl` | one JSON object per line — good for streaming/piping |
 | `csv` | RFC-4180 CSV with a header row |
 | `list` | one row per line, columns tab-separated (bare values when single-column) |
 
 ```bash
-execute-db --dev -o csv   "SELECT id, email FROM users" > users.csv
-execute-db --dev -o jsonl "SELECT * FROM events"        | jq .
-execute-db --dev -o list  "SELECT email FROM users"     # one email per line
+execute-db --dev -o csv      "SELECT id, email FROM users" > users.csv
+execute-db --dev -o jsonl    "SELECT * FROM events"        | jq .
+execute-db --dev -o list     "SELECT email FROM users"     # one email per line
+execute-db --dev -o vertical "SELECT * FROM users"         # stacked, narrow-friendly
 ```
+
+**Paging for wide results.** At an interactive terminal, the `table` and `vertical` formats are piped through a pager (`$PAGER`, or `less -S`) so lines wider than the window **scroll left/right** instead of wrapping — use the arrow keys, `q` to quit. Short results that fit on one screen print directly. Piped or redirected output (`> file`, `| cmd`) and the machine formats are never paged. Pass `--no-pager` to disable paging even at a terminal.
 
 **stdout carries result data only.** Status and metadata go to stderr, so piped output stays clean. Pass `--meta` to print a `2 rows, columns: id, name` summary to stderr for row-returning queries.
 

@@ -99,3 +99,79 @@ def test_jsonb_cell_is_json_encoded_in_text_formats():
 def test_non_row_kinds_produce_no_stdout():
     assert exec_cmd.format_result(QueryResult("count", rowcount=3), "table") == ""
     assert exec_cmd.format_result(QueryResult("ok"), "json") == ""
+
+
+# --- vertical / expanded -------------------------------------------------
+
+def test_vertical_blocks_one_per_row():
+    r = rows_result(["id", "name"], [(1, "Alice"), (2, "Bob")])
+    out = exec_cmd.format_result(r, "vertical")
+    blocks = out.split("\n\n")
+    assert blocks[0].splitlines() == ["[ row 1 ]", "id   | 1", "name | Alice"]
+    assert blocks[1].splitlines() == ["[ row 2 ]", "id   | 2", "name | Bob"]
+
+
+def test_vertical_renders_null_and_jsonb():
+    r = rows_result(["a", "data"], [(None, {"k": 1})])
+    out = exec_cmd.format_result(r, "vertical")
+    assert "a    | NULL" in out
+    assert 'data | {"k": 1}' in out
+
+
+def test_vertical_empty_is_empty_string():
+    assert exec_cmd.format_result(rows_result(["id"], []), "vertical") == ""
+
+
+# --- pager routing -------------------------------------------------------
+
+def test_emit_prints_plainly_when_not_a_tty(monkeypatch, capsys):
+    monkeypatch.setattr(exec_cmd.sys.stdout, "isatty", lambda: False)
+    called = []
+    monkeypatch.setattr(exec_cmd, "_run_pager", lambda t: called.append(t) or True)
+    exec_cmd._emit("hello", use_pager=True)
+    assert called == []                       # pager not used off a TTY
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_emit_uses_pager_at_a_tty(monkeypatch, capsys):
+    monkeypatch.setattr(exec_cmd.sys.stdout, "isatty", lambda: True)
+    called = []
+    monkeypatch.setattr(exec_cmd, "_run_pager", lambda t: called.append(t) or True)
+    exec_cmd._emit("hello", use_pager=True)
+    assert called == ["hello"]                # paged, not printed
+    assert capsys.readouterr().out == ""
+
+
+def test_emit_falls_back_to_print_when_pager_unavailable(monkeypatch, capsys):
+    monkeypatch.setattr(exec_cmd.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(exec_cmd, "_run_pager", lambda t: False)  # no pager
+    exec_cmd._emit("hello", use_pager=True)
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_emit_no_pager_flag_forces_plain(monkeypatch, capsys):
+    monkeypatch.setattr(exec_cmd.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(exec_cmd, "_run_pager",
+                        lambda t: (_ for _ in ()).throw(AssertionError("paged")))
+    exec_cmd._emit("hello", use_pager=False)  # --no-pager path
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_broken_pager_env_falls_back_without_losing_output(monkeypatch, capsys):
+    # A stale/misspelled $PAGER must not swallow the result data.
+    monkeypatch.setenv("PAGER", "this-pager-does-not-exist-xyz")
+    assert exec_cmd._run_pager("important data") is False
+    monkeypatch.setattr(exec_cmd.sys.stdout, "isatty", lambda: True)
+    exec_cmd._emit("important data", use_pager=True)
+    assert capsys.readouterr().out == "important data\n"
+
+
+def test_empty_pager_env_falls_back(monkeypatch):
+    monkeypatch.setenv("PAGER", "   ")
+    assert exec_cmd._run_pager("x") is False
+
+
+def test_machine_formats_are_never_paged():
+    assert "json" not in exec_cmd.HUMAN_FORMATS
+    assert "csv" not in exec_cmd.HUMAN_FORMATS
+    assert set(exec_cmd.HUMAN_FORMATS) == {"table", "vertical"}

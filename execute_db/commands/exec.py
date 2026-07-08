@@ -9,6 +9,9 @@ import argparse
 import csv
 import io
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -55,10 +58,16 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
                         help="output format for result rows (default: table)")
     parser.add_argument("--meta", action="store_true",
                         help="print a row-count/columns summary to stderr")
+    parser.add_argument("--no-pager", dest="pager", action="store_false",
+                        help="do not page table/vertical output through $PAGER "
+                             "even at a terminal")
     return parser
 
 
-FORMATS = ("table", "json", "jsonl", "csv", "list")
+# `table` and `vertical` are for human eyes: at a TTY they are paged (so wide
+# rows scroll instead of wrapping). The rest are machine formats, never paged.
+FORMATS = ("table", "vertical", "json", "jsonl", "csv", "list")
+HUMAN_FORMATS = ("table", "vertical")
 
 
 def _cell(value) -> str:
@@ -90,6 +99,24 @@ def _format_table(columns: list, rows: list) -> str:
     return "\n".join(out)
 
 
+def _format_vertical(columns: list, rows: list) -> str:
+    """One block per row (psql \\x style): a `column | value` line per field.
+
+    Values are not wrapped; wide ones scroll under the pager rather than
+    breaking the alignment.
+    """
+    if not rows:
+        return ""
+    label = max(len(c) for c in columns)
+    blocks = []
+    for i, row in enumerate(rows, 1):
+        lines = [f"[ row {i} ]"]
+        lines += [f"{col.ljust(label)} | {_cell(val)}"
+                  for col, val in zip(columns, row)]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def format_result(result: query.QueryResult, fmt: str) -> str:
     """Format a result's *data* for stdout. Non-row kinds carry no data ("")."""
     if result.kind != "rows":
@@ -111,16 +138,51 @@ def format_result(result: query.QueryResult, fmt: str) -> str:
         return buf.getvalue().rstrip("\n")
     if fmt == "list":
         return "\n".join("\t".join(_cell(v) for v in row) for row in rows)
+    if fmt == "vertical":
+        return _format_vertical(columns, rows)
     return _format_table(columns, rows)
 
 
-def _print_result(result: query.QueryResult, fmt: str = "table", meta: bool = False):
+def _run_pager(text: str) -> bool:
+    """Display `text` through a pager. Return False if none could run.
+
+    Honors $PAGER if set; otherwise `less -S` (chop long lines so wide rows
+    scroll left/right), `-R` (pass color through), `-F` (quit if it fits on
+    one screen). A missing pager or an early quit (broken pipe) is not fatal.
+    """
+    pager = os.environ.get("PAGER")
+    # Split $PAGER into argv (so "less -R" works) and run without a shell, so a
+    # missing/misspelled pager raises OSError here and we fall back to print
+    # rather than the shell swallowing the text and reporting bogus success.
+    cmd = shlex.split(pager) if pager else ["less", "-S", "-R", "-F"]
+    if not cmd:
+        return False  # PAGER set but empty/whitespace
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    except OSError:
+        return False  # e.g. pager not installed
+    try:
+        proc.communicate(text.encode())
+    except BrokenPipeError:
+        pass
+    return True
+
+
+def _emit(text: str, use_pager: bool):
+    """Write result data to stdout, paging it when asked and at a terminal."""
+    if use_pager and sys.stdout.isatty() and _run_pager(text):
+        return
+    print(text)
+
+
+def _print_result(result: query.QueryResult, fmt: str = "table",
+                  meta: bool = False, pager: bool = True):
     # stdout carries result data only; status/metadata go to stderr so piped
     # output (csv/json/...) stays clean.
     if result.kind == "rows":
         data = format_result(result, fmt)
         if data:
-            print(data)
+            _emit(data, use_pager=pager and fmt in HUMAN_FORMATS)
         if meta:
             n = len(result.rows)
             print(f"{n} row{'' if n == 1 else 's'}, "
@@ -161,7 +223,8 @@ def run(argv: list):
         parser.error("provide SQL as an argument, via -f FILE, or pipe to stdin")
 
     try:
-        _print_result(query.run_query(database_url, sql), args.format, args.meta)
+        _print_result(query.run_query(database_url, sql),
+                      args.format, args.meta, args.pager)
     except Exception as e:
         # In system mode the agent sees this over sudo; psycopg2 errors can echo
         # host/user/dbname. Keep the detail for interactive user-mode debugging.
