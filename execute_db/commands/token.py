@@ -68,11 +68,9 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         prog="execute-db token",
         description=(
             "Ephemeral tokens grant temporary, password-free access to one\n"
-            "environment — e.g. handing a script or coding agent scoped access\n"
-            "for an afternoon. A token works without a terminal until it expires\n"
-            "or is revoked.\n\n"
-            "Create a token, hand it to the caller, and they use it in place of an\n"
-            "--<env> flag:  execute-db --token <TOKEN> \"SELECT ...\""
+            "environment — e.g. handing a script or coding agent scoped access for\n"
+            "an afternoon. The holder uses it in place of an --<env> flag:\n"
+            '  execute-db --token <TOKEN> "SELECT ..."'
         ),
         epilog="examples:\n"
                "  execute-db token create --dev --ttl 2h   # 2-hour token for 'dev'\n"
@@ -85,15 +83,10 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         "create",
         help="create a short-lived token for an environment",
         description=(
-            "Create a token for one environment. If the environment is password\n"
-            "protected you are prompted for its password — the token is a copy of\n"
-            "the credentials re-encrypted under a fresh random secret with the\n"
-            "expiry sealed into the authenticated header.\n\n"
-            "Half of the encryption key (a key share) lives only in the kernel\n"
-            "keyring with a TTL: the kernel destroys it at expiry or reboot, so\n"
-            "even a copied token file becomes permanently undecryptable.\n\n"
-            "The token is printed ONCE and cannot be recovered; pass it to the\n"
-            'holder, who runs:  execute-db --token <TOKEN> "SELECT ..."'
+            "Mint a token for one environment (prompts for its password if\n"
+            "encrypted). Half the key lives only in the kernel keyring with a TTL,\n"
+            "so at expiry/reboot even a copied token file becomes undecryptable.\n"
+            "The token is printed ONCE and cannot be recovered."
         ),
         formatter_class=raw,
     )
@@ -104,9 +97,8 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         "list",
         help="list active tokens (purges expired ones)",
         description=(
-            "List active token ids and their expiry times. Token files that have\n"
-            "already expired are deleted as a side effect. The token secrets\n"
-            "themselves are never shown — they are only displayed at creation."
+            "List active token ids and their expiry times, deleting any that have\n"
+            "already expired. Token secrets are only ever shown at creation."
         ),
         formatter_class=raw,
     )
@@ -120,10 +112,8 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         "sweep",
         help="wipe expired token files now",
         description=(
-            "Wipe any expired token files. Runs automatically via systemd user\n"
-            "timers (scheduled at each token's expiry, plus once after boot) and\n"
-            "as a backstop on every execute-db invocation, so you rarely need to\n"
-            "run it by hand."
+            "Wipe any expired token files. Also runs automatically via systemd\n"
+            "timers and on every execute-db invocation, so you rarely need it."
         ),
         formatter_class=raw,
     )

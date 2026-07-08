@@ -16,35 +16,42 @@ from .core.system import maybe_redirect_to_launcher
 TOP_LEVEL_HELP = """\
 execute-db {version} — run SQL against configured PostgreSQL environments
 
-New here? Start by adding an environment, then run SQL against it:
-  execute-db config set dev              save a connection (prompts for URL + password)
-  execute-db --dev "SELECT 1"            run a statement against it
+Quick start:
+  execute-db config set dev            add an environment (prompts for URL + password)
+  execute-db --dev "SELECT 1"          run SQL against it
 
-Run SQL:
-  execute-db --<env> "SELECT 1"          run a statement against an environment
-  execute-db --<env> -f migration.sql    run SQL from a file
-  cat q.sql | execute-db --<env>          run SQL piped on stdin
-  execute-db --<env> -o csv "TABLE t"    choose an output format (table/json/csv/...)
-  execute-db --token <TOKEN> "SELECT 1"   run with an ephemeral token
+Run SQL against an environment (each configured env is an --<env> flag):
+  execute-db --dev "SELECT * FROM t"   pass SQL as a quoted argument
+  execute-db --dev -f migration.sql    ...or read it from a .sql file
+  execute-db --dev < migration.sql     ...or pipe it on stdin
+  execute-db --dev -o csv "TABLE t"    pick an output format (see below)
+  execute-db --token <TOKEN> "..."     use an ephemeral token instead of --<env>
+  Everything runs in one transaction: commit on success, rollback on any error.
+  Encrypted envs prompt for a password; use a token for unattended access.
+
+Output formats (-o/--format, default: table):
+  table     aligned columns, paged at a terminal (--no-pager to disable)
+  vertical  one field per line (psql \\x style) — best for wide rows
+  json      pretty JSON array      jsonl  one JSON object per line
+  csv       header + rows          list   tab-separated, no header (for cut/awk)
+  Only result rows go to stdout; row counts and --meta summaries go to stderr.
 
 Manage environments (each is an encrypted .env.<name> file in ~/.execute-db):
-  execute-db config list                 list environments and their state
-  execute-db config set <name>           create/replace one (prompts for URL + password)
-  execute-db config rm <name>            remove one and revoke outstanding tokens
+  execute-db config list               list environments and whether each is encrypted
+  execute-db config set <name>         create/replace one (prompts for URL + password)
+  execute-db config rm <name>          remove one and revoke its tokens
 
-Password protection:
-  execute-db password set --<env>        encrypt an environment with a password
-  execute-db password change --<env>     rotate an environment's password
+Password-protect an environment:
+  execute-db password set --dev        encrypt an environment with a password
+  execute-db password change --dev     rotate its password
 
-Ephemeral tokens (temporary password-free access):
-  execute-db token create --<env> --ttl 2h   mint a short-lived token
-  execute-db token list                       list active tokens
-  execute-db token revoke <id>                revoke a token early
+Ephemeral tokens — temporary, password-free access (e.g. for a script or agent):
+  execute-db token create --dev --ttl 2h   mint a short-lived token (45s/30m/2h/1d)
+  execute-db token list                     list active tokens
+  execute-db token revoke <id>              revoke one early
 
-More help:
-  execute-db --<env> --help              full options + output formats for running SQL
-  execute-db <command> --help            detailed help for config/password/token
-  execute-db --version                   print the version
+  execute-db --version                 print the version
+  execute-db <command> --help          per-command flags (config/password/token)
 """
 
 

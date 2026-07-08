@@ -51,11 +51,9 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="execute-db password",
         description=(
-            "Encrypt an environment's .env file so it can only be used after\n"
-            "entering its password on an interactive terminal.\n\n"
-            "Files are encrypted with AES-256-GCM (scrypt-derived key). There is\n"
-            "no password recovery: if you forget it, delete the encrypted file,\n"
-            "recreate it with your connection string, and set a password again."
+            "Encrypt an environment so it can only be used after entering its\n"
+            "password on a terminal (AES-256-GCM, scrypt-derived key). There is no\n"
+            "password recovery — forget it and you recreate the environment."
         ),
         epilog="examples:\n"
                "  execute-db password set --dev      # encrypt 'dev' for the first time\n"
@@ -67,12 +65,9 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         "set",
         help="encrypt a plaintext .env file with a new password",
         description=(
-            "Encrypt an environment's plaintext .env file. Prompts for a new\n"
-            "password (twice) on the terminal, encrypts the file, and makes a\n"
-            "best-effort wipe of the plaintext original.\n\n"
-            "Afterwards, running SQL against the environment prompts for the\n"
-            "password; non-interactive callers are refused (use an ephemeral\n"
-            "token for that — see `execute-db token create --help`)."
+            "Encrypt a plaintext environment with a new password (prompted twice),\n"
+            "then best-effort wipe the plaintext original. Non-interactive callers\n"
+            "are then refused — use an ephemeral token for unattended access."
         ),
         formatter_class=raw,
     )

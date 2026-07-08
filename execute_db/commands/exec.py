@@ -27,45 +27,18 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         prog="execute-db",
         description=(
             "Run SQL against one of your configured PostgreSQL environments.\n\n"
-            "Pick the target with its --<name> flag (run `execute-db config list`\n"
-            "to see what's available). Supply the SQL as a quoted argument, from a\n"
-            "file with -f, or piped on stdin.\n\n"
-            "All statements run inside a single transaction: it commits if every\n"
-            "statement succeeds and rolls back entirely on the first error, so a\n"
-            "failed migration leaves nothing half-applied. A SELECT prints its\n"
-            "rows; a write reports the row count; DDL just confirms it ran.\n\n"
-            "Password-protected environments prompt for their password on the\n"
-            "terminal; use an ephemeral token (see below) for unattended access."
+            "Pick the target with its --<name> flag, and supply the SQL as a quoted\n"
+            "argument, from a file with -f, or piped on stdin. Everything runs in a\n"
+            "single transaction (commit on success, rollback on any error).\n\n"
+            "Run `execute-db --help` for the full overview, including output formats\n"
+            "and the config/password/token commands."
         ),
         epilog='examples:\n'
-               '  execute-db --dev "SELECT * FROM users LIMIT 5"   run a query\n'
-               '  execute-db --dev "INSERT INTO users (name) VALUES (\'Alice\')"\n'
+               '  execute-db --dev "SELECT * FROM users LIMIT 5"\n'
                '  execute-db --dev -f migration.sql                run SQL from a file\n'
                '  execute-db --dev < migration.sql                 same, via stdin\n'
                '  execute-db --prod -o csv "TABLE users" > out.csv export to CSV\n'
-               '  execute-db --token 8YOfCttjVdI5FdUfB-X6Vw "SELECT 1"\n'
-               '\n'
-               'output formats (-o/--format):\n'
-               '  table     aligned columns, easy to read in a terminal (default)\n'
-               '  vertical  one field per line (psql \\x style) — best for wide rows\n'
-               '  json      a JSON array of row objects — feed to jq or an app\n'
-               '  jsonl     one JSON object per line — streams large result sets\n'
-               '  csv       comma-separated with a header row — open in a spreadsheet\n'
-               '  list      tab-separated values, no header — for cut/awk/xargs\n'
-               '\n'
-               '  Only result rows go to stdout; row counts and --meta summaries go\n'
-               '  to stderr, so redirecting (e.g. -o csv > out.csv) yields a clean\n'
-               '  file. table and vertical are paged through $PAGER (default `less\n'
-               '  -S`, so wide rows scroll sideways) at a terminal; --no-pager or\n'
-               '  any machine format prints straight through.\n'
-               '\n'
-               'management commands (details: execute-db <command> --help):\n'
-               '  config set <name>               add or replace an environment\n'
-               '  password set --<env>            encrypt an env file with a password\n'
-               '  password change --<env>         rotate an env file\'s password\n'
-               '  token create --<env> --ttl 2h   mint a short-lived password-free token\n'
-               '  token list                      show active tokens\n'
-               '  token revoke <id>               revoke a token early',
+               '  execute-db --token <TOKEN> "SELECT 1"            use an ephemeral token',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     group = add_env_flags(parser, envs)

@@ -80,13 +80,7 @@ def cmd_rm(alias: str):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="execute-db config",
-        description=(
-            "Manage the connections execute-db can run SQL against.\n\n"
-            "Each environment is stored as an encrypted .env.<name> file under\n"
-            "~/.execute-db and becomes an --<name> flag on the other commands.\n"
-            "Start here: `config set dev` saves a connection string, then\n"
-            "`execute-db --dev \"SELECT 1\"` runs against it."
-        ),
+        description="Create, list, and remove the environments execute-db runs SQL against.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="examples:\n"
                "  execute-db config list          # show what's configured\n"
@@ -99,10 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
         "set",
         help="add or replace an environment (prompts for connection URL + password)",
         description=(
-            "Create or overwrite an environment. Prompts on the terminal for a\n"
-            "PostgreSQL connection URL (postgresql://user:pass@host/db) and a\n"
-            "password to encrypt it with. The URL is never taken from the command\n"
-            "line, and re-running `set` is also how you reset a forgotten password."
+            "Create or replace an environment. Prompts for a PostgreSQL URL and a\n"
+            "password to encrypt it with (the URL is never read from the command\n"
+            "line). Re-running `set` is also how you reset a forgotten password."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -113,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Securely wipe an environment's file and revoke any ephemeral tokens.\n"
             "Rotate the database password server-side afterwards to fully cut off\n"
-            "access from any token that was already copied elsewhere."
+            "any token already copied elsewhere."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
