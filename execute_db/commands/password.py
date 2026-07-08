@@ -57,6 +57,9 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
             "no password recovery: if you forget it, delete the encrypted file,\n"
             "recreate it with your connection string, and set a password again."
         ),
+        epilog="examples:\n"
+               "  execute-db password set --dev      # encrypt 'dev' for the first time\n"
+               "  execute-db password change --dev   # rotate 'dev's password",
         formatter_class=raw,
     )
     sub = parser.add_subparsers(dest="action", required=True, metavar="{set,change}")

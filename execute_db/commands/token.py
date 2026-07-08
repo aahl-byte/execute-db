@@ -70,8 +70,14 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
             "Ephemeral tokens grant temporary, password-free access to one\n"
             "environment — e.g. handing a script or coding agent scoped access\n"
             "for an afternoon. A token works without a terminal until it expires\n"
-            "or is revoked."
+            "or is revoked.\n\n"
+            "Create a token, hand it to the caller, and they use it in place of an\n"
+            "--<env> flag:  execute-db --token <TOKEN> \"SELECT ...\""
         ),
+        epilog="examples:\n"
+               "  execute-db token create --dev --ttl 2h   # 2-hour token for 'dev'\n"
+               "  execute-db token list                    # ids + expiry of active tokens\n"
+               "  execute-db token revoke <id>             # kill one early",
         formatter_class=raw,
     )
     sub = parser.add_subparsers(dest="action", required=True, metavar="{create,list,revoke}")

@@ -16,10 +16,15 @@ from .core.system import maybe_redirect_to_launcher
 TOP_LEVEL_HELP = """\
 execute-db {version} — run SQL against configured PostgreSQL environments
 
+New here? Start by adding an environment, then run SQL against it:
+  execute-db config set dev              save a connection (prompts for URL + password)
+  execute-db --dev "SELECT 1"            run a statement against it
+
 Run SQL:
   execute-db --<env> "SELECT 1"          run a statement against an environment
   execute-db --<env> -f migration.sql    run SQL from a file
   cat q.sql | execute-db --<env>          run SQL piped on stdin
+  execute-db --<env> -o csv "TABLE t"    choose an output format (table/json/csv/...)
   execute-db --token <TOKEN> "SELECT 1"   run with an ephemeral token
 
 Manage environments (each is an encrypted .env.<name> file in ~/.execute-db):
@@ -36,8 +41,10 @@ Ephemeral tokens (temporary password-free access):
   execute-db token list                       list active tokens
   execute-db token revoke <id>                revoke a token early
 
+More help:
+  execute-db --<env> --help              full options + output formats for running SQL
+  execute-db <command> --help            detailed help for config/password/token
   execute-db --version                   print the version
-  execute-db <command> --help            detailed help for a command
 """
 
 

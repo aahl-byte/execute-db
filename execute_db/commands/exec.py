@@ -26,19 +26,41 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="execute-db",
         description=(
-            "Execute SQL statements against configured databases.\n\n"
-            "Statements run in a single transaction: committed on success, rolled\n"
-            "back on error. Each environment is a .env.<name> file in the store;\n"
-            "each becomes an --<name> flag. Password-protected environments\n"
-            "prompt for their password on the terminal."
+            "Run SQL against one of your configured PostgreSQL environments.\n\n"
+            "Pick the target with its --<name> flag (run `execute-db config list`\n"
+            "to see what's available). Supply the SQL as a quoted argument, from a\n"
+            "file with -f, or piped on stdin.\n\n"
+            "All statements run inside a single transaction: it commits if every\n"
+            "statement succeeds and rolls back entirely on the first error, so a\n"
+            "failed migration leaves nothing half-applied. A SELECT prints its\n"
+            "rows; a write reports the row count; DDL just confirms it ran.\n\n"
+            "Password-protected environments prompt for their password on the\n"
+            "terminal; use an ephemeral token (see below) for unattended access."
         ),
         epilog='examples:\n'
+               '  execute-db --dev "SELECT * FROM users LIMIT 5"   run a query\n'
                '  execute-db --dev "INSERT INTO users (name) VALUES (\'Alice\')"\n'
-               '  execute-db --dev -f migration.sql\n'
-               '  execute-db --dev < migration.sql\n'
+               '  execute-db --dev -f migration.sql                run SQL from a file\n'
+               '  execute-db --dev < migration.sql                 same, via stdin\n'
+               '  execute-db --prod -o csv "TABLE users" > out.csv export to CSV\n'
                '  execute-db --token 8YOfCttjVdI5FdUfB-X6Vw "SELECT 1"\n'
                '\n'
+               'output formats (-o/--format):\n'
+               '  table     aligned columns, easy to read in a terminal (default)\n'
+               '  vertical  one field per line (psql \\x style) — best for wide rows\n'
+               '  json      a JSON array of row objects — feed to jq or an app\n'
+               '  jsonl     one JSON object per line — streams large result sets\n'
+               '  csv       comma-separated with a header row — open in a spreadsheet\n'
+               '  list      tab-separated values, no header — for cut/awk/xargs\n'
+               '\n'
+               '  Only result rows go to stdout; row counts and --meta summaries go\n'
+               '  to stderr, so redirecting (e.g. -o csv > out.csv) yields a clean\n'
+               '  file. table and vertical are paged through $PAGER (default `less\n'
+               '  -S`, so wide rows scroll sideways) at a terminal; --no-pager or\n'
+               '  any machine format prints straight through.\n'
+               '\n'
                'management commands (details: execute-db <command> --help):\n'
+               '  config set <name>               add or replace an environment\n'
                '  password set --<env>            encrypt an env file with a password\n'
                '  password change --<env>         rotate an env file\'s password\n'
                '  token create --<env> --ttl 2h   mint a short-lived password-free token\n'
@@ -50,17 +72,21 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
     group.add_argument("--token", metavar="TOKEN",
                        help="connect with an ephemeral access token instead of an "
                             "environment (no password prompt; see `execute-db token --help`)")
-    parser.add_argument("sql", nargs="?",
-                        help="SQL statement to execute (omit to read from -f FILE or stdin)")
+    parser.add_argument("sql", nargs="?", metavar="SQL",
+                        help="the SQL to run, as one quoted argument "
+                             "(omit to read from -f FILE or piped stdin)")
     parser.add_argument("-f", "--file", metavar="FILE",
-                        help="read the SQL to execute from a .sql file")
+                        help="read the SQL to run from a .sql file instead of an argument")
     parser.add_argument("-o", "--format", choices=FORMATS, default="table",
-                        help="output format for result rows (default: table)")
+                        metavar="FORMAT",
+                        help="how to render result rows: "
+                             "table (default), vertical, json, jsonl, csv, or list "
+                             "(see 'output formats' below)")
     parser.add_argument("--meta", action="store_true",
-                        help="print a row-count/columns summary to stderr")
+                        help="also print a `N rows, columns: ...` summary to stderr")
     parser.add_argument("--no-pager", dest="pager", action="store_false",
-                        help="do not page table/vertical output through $PAGER "
-                             "even at a terminal")
+                        help="print table/vertical output straight to stdout instead "
+                             "of paging it through $PAGER at a terminal")
     return parser
 
 
