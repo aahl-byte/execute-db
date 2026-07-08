@@ -1,4 +1,4 @@
-from execute_db.core import store as store_mod
+from db_core.core import store as store_mod
 
 
 def _write(store, name, body=b"DATABASE_URL=postgresql://x\n"):

@@ -1,7 +1,9 @@
 """Privilege separation (hardened / system mode).
 
 When installed hardened, secrets live under a dedicated service user and the
-CLI runs as that user via sudo. See install.sh and the README.
+CLI runs as that user via sudo. The service user, launcher path, and config
+directory are all derived from the active app's name (see `db_core.app`), so
+execute-db and explore-db harden independently. See install.sh and the README.
 """
 
 import os
@@ -9,16 +11,27 @@ import pwd
 import sys
 from pathlib import Path
 
-SERVICE_USER = "executedb"
-LAUNCHER = "/usr/local/bin/execute-db"
+from .. import app
+
 MAX_SYSTEM_TTL_SECONDS = 24 * 3600  # cap on --ttl in system mode
 
-SYSTEM_MARKER = Path.home() / ".execute-db" / "SYSTEM"  # redirect hint (user side)
+
+def service_user() -> str:
+    return app.current().service_user
+
+
+def launcher() -> str:
+    return app.current().launcher
+
+
+def system_marker() -> Path:
+    # redirect hint on the user side; always resolved against the real $HOME.
+    return Path.home() / app.current().config_dirname / "SYSTEM"
 
 
 def service_uid():
     try:
-        return pwd.getpwnam(SERVICE_USER).pw_uid
+        return pwd.getpwnam(service_user()).pw_uid
     except KeyError:
         return None
 
@@ -35,11 +48,12 @@ def maybe_redirect_to_launcher():
     lives in a user-writable dir and PATH can be shadowed, so real protection
     depends on the human invoking the trusted absolute path. See the README.
     """
-    if in_system_mode() or os.environ.get("EXECUTE_DB_NO_SYSTEM"):
+    if in_system_mode() or os.environ.get(app.current().no_system_env):
         return
     try:
-        has_marker = SYSTEM_MARKER.exists()
+        has_marker = system_marker().exists()
     except OSError:
         has_marker = False
-    if has_marker and os.path.exists(LAUNCHER):
-        os.execv(LAUNCHER, [LAUNCHER, *sys.argv[1:]])
+    launch = launcher()
+    if has_marker and os.path.exists(launch):
+        os.execv(launch, [launch, *sys.argv[1:]])

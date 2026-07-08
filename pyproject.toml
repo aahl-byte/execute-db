@@ -12,11 +12,17 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[tool.setuptools]
+# db_core is the shared engine; execute_db and explore_db are thin front-ends
+# that each install an AppSpec and hand off to it.
+packages = ["db_core", "db_core.core", "db_core.commands", "execute_db", "explore_db"]
+
 [tool.setuptools.dynamic]
 version = {attr = "execute_db.__version__"}
 
 [project.scripts]
 execute-db = "execute_db.cli:main"
+explore-db = "explore_db.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

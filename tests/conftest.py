@@ -1,22 +1,32 @@
 import pytest
 
-from execute_db.core import store as store_mod
-from execute_db.core import system
+from db_core import app
+from db_core.core import store as store_mod
+from db_core.core import system
+
+# Every test runs as one app; default to the execute-db (read/write) identity so
+# code that reads app.current() works even outside a front-end. Individual tests
+# reconfigure (e.g. to the read-only explore-db spec) as needed.
+EXECUTE_SPEC = app.AppSpec(name="execute-db", read_only=False, version="0.0.0-test")
+
+
+@pytest.fixture(autouse=True)
+def _app():
+    app.configure(EXECUTE_SPEC)
+    yield
 
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Redirect the store-layout globals at a temp dir and return it.
+    """Point the store at a temp dir and return it.
 
-    Store paths live in `core.store`; system-mode detection lives in
-    `core.system`. Every module references them by attribute, so patching them
-    here reaches all consumers.
+    Store paths resolve through `store.config_dir()`, which honors the
+    `_dir_override`; system-mode detection lives in `core.system`. Patching both
+    here reaches every consumer.
     """
     d = tmp_path / ".execute-db"
     d.mkdir()
-    monkeypatch.setattr(store_mod, "CONFIG_DIR", d)
-    monkeypatch.setattr(store_mod, "CONFIG_FILE", d / "config.json")
-    monkeypatch.setattr(store_mod, "EPHEMERAL_DIR", d / ".ephemeral")
+    monkeypatch.setattr(store_mod, "_dir_override", d)
     # Never let a test think it is running as the service user.
     monkeypatch.setattr(system, "in_system_mode", lambda: False)
     return d

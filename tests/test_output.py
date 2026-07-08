@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from execute_db.commands import exec as exec_cmd
-from execute_db.core.query import QueryResult
+from db_core.commands import exec as exec_cmd
+from db_core.core.query import QueryResult
 
 
 def rows_result(columns, rows):

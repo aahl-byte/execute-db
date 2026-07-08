@@ -9,6 +9,7 @@ import sys
 from datetime import datetime
 
 from .flags import add_env_flags, selected_env
+from .. import app
 from ..console import fail
 from ..core import crypto, tokens
 from ..core.store import discover_envs
@@ -31,9 +32,9 @@ def cmd_create(env: str, ttl: str):
         print("  auto-wipe: systemd user timer scheduled at expiry")
     else:
         print("  auto-wipe: could not schedule a systemd user timer — the file "
-              "will only be wiped on the next execute-db run after expiry",
+              f"will only be wiped on the next {app.current().name} run after expiry",
               file=sys.stderr)
-    print(f'Use it with: execute-db --token {res.token} "SELECT ..."')
+    print(f'Use it with: {app.current().name} --token {res.token} "SELECT ..."')
     print("This token is shown once and cannot be recovered.")
 
 
@@ -54,7 +55,7 @@ def cmd_list():
 
 def cmd_revoke(tid: str):
     if not tokens.revoke_token(tid):
-        fail(f"No token with id '{tid}' (see `execute-db token list`)")
+        fail(f"No token with id '{tid}' (see `{app.current().name} token list`)")
     print(f"Revoked token {tid}")
 
 
@@ -64,18 +65,19 @@ def cmd_sweep():
 
 def build_parser(envs: list) -> argparse.ArgumentParser:
     raw = argparse.RawDescriptionHelpFormatter
+    name = app.current().name
     parser = argparse.ArgumentParser(
-        prog="execute-db token",
+        prog=f"{name} token",
         description=(
             "Ephemeral tokens grant temporary, password-free access to one\n"
             "environment — e.g. handing a script or coding agent scoped access for\n"
             "an afternoon. The holder uses it in place of an --<env> flag:\n"
-            '  execute-db --token <TOKEN> "SELECT ..."'
+            f'  {name} --token <TOKEN> "SELECT ..."'
         ),
         epilog="examples:\n"
-               "  execute-db token create --dev --ttl 2h   # 2-hour token for 'dev'\n"
-               "  execute-db token list                    # ids + expiry of active tokens\n"
-               "  execute-db token revoke <id>             # kill one early",
+               f"  {name} token create --dev --ttl 2h   # 2-hour token for 'dev'\n"
+               f"  {name} token list                    # ids + expiry of active tokens\n"
+               f"  {name} token revoke <id>             # kill one early",
         formatter_class=raw,
     )
     sub = parser.add_subparsers(dest="action", required=True, metavar="{create,list,revoke}")
@@ -107,13 +109,13 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         help="revoke a token by id, before it expires",
         description="Delete a token so it stops working immediately.",
     )
-    p_revoke.add_argument("id", help="token id, as shown by `execute-db token list`")
+    p_revoke.add_argument("id", help=f"token id, as shown by `{name} token list`")
     sub.add_parser(
         "sweep",
         help="wipe expired token files now",
         description=(
             "Wipe any expired token files. Also runs automatically via systemd\n"
-            "timers and on every execute-db invocation, so you rarely need it."
+            f"timers and on every {name} invocation, so you rarely need it."
         ),
         formatter_class=raw,
     )
@@ -124,7 +126,7 @@ def run(argv: list):
     envs = discover_envs()
     if not envs:
         fail("No environments configured. Create one with "
-             "`execute-db config set <name>`.")
+             f"`{app.current().name} config set <name>`.")
     args = build_parser(envs).parse_args(argv)
     try:
         if args.action == "create":

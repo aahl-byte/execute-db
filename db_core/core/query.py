@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import psycopg2
 
+from .. import app
+
 
 @dataclass
 class QueryResult:
@@ -22,7 +24,14 @@ class QueryResult:
 
 
 def run_query(database_url: str, sql: str) -> QueryResult:
-    conn = psycopg2.connect(database_url, sslmode="require")
+    # In read-only apps (explore-db) the server itself rejects any write: a
+    # read-only transaction fails on INSERT/UPDATE/DELETE/DDL, so the guarantee
+    # does not depend on parsing the SQL. Committing a read-only transaction is
+    # harmless, so the surrounding flow stays identical for both apps.
+    connect_kwargs = {"sslmode": "require"}
+    if app.current().read_only:
+        connect_kwargs["options"] = "-c default_transaction_read_only=on"
+    conn = psycopg2.connect(database_url, **connect_kwargs)
     try:
         with conn.cursor() as cur:
             cur.execute(sql)

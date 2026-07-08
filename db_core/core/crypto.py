@@ -1,4 +1,4 @@
-"""Password encryption for execute-db env files.
+"""Password encryption for the database CLI env files.
 
 Binary file format:
 
@@ -41,7 +41,7 @@ class DecryptionError(CryptoError):
 
 
 class NotEncryptedError(CryptoError):
-    """The data is not in the execute-db encrypted format."""
+    """The data is not in the recognized encrypted format."""
 
 
 class NoTTYError(CryptoError):
@@ -72,7 +72,7 @@ def encrypt(plaintext: bytes, password: str, expiry: int = 0) -> bytes:
 
 def decrypt(blob: bytes, password: str) -> bytes:
     if blob[: len(MAGIC)] != MAGIC:
-        raise NotEncryptedError("not an execute-db encrypted file")
+        raise NotEncryptedError("not a recognized encrypted file")
 
     header = blob[:HEADER_LEN]
     salt = blob[HEADER_LEN : HEADER_LEN + SALT_LEN]
@@ -94,7 +94,7 @@ def expiry_of(blob: bytes) -> int:
     the authenticated header by decrypting before granting access.
     """
     if blob[: len(MAGIC)] != MAGIC:
-        raise NotEncryptedError("not an execute-db encrypted file")
+        raise NotEncryptedError("not a recognized encrypted file")
     return struct.unpack(">Q", blob[len(MAGIC) : HEADER_LEN])[0]
 
 
@@ -146,16 +146,22 @@ def prompt_line(prompt: str) -> str:
     return value
 
 
-def prompt_password(prompt: str = "Password: ", confirm: bool = False) -> str:
+def prompt_password(prompt: str = "Password: ", confirm: bool = False,
+                    allow_empty: bool = False) -> str:
     """Prompt on the controlling terminal; never read the password from stdin.
 
     stdin may be carrying piped SQL, and requiring a real terminal is what
     keeps non-interactive callers from supplying a password programmatically.
+
+    With `allow_empty`, an empty entry is returned as "" (the caller treats it
+    as "no encryption") instead of prompting for confirmation.
     """
     if not _tty_available():
         raise NoTTYError("no interactive terminal available")
 
     password = getpass.getpass(prompt)
+    if allow_empty and password == "":
+        return ""
     if confirm:
         if getpass.getpass("Confirm password: ") != password:
             raise CryptoError("passwords do not match")

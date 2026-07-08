@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from .flags import add_env_flags, selected_env
+from .. import app
 from ..console import fail
 from ..core import query, store, tokens
 from ..core.store import discover_envs
@@ -23,28 +24,36 @@ from ..core.system import in_system_mode
 
 
 def build_parser(envs: list) -> argparse.ArgumentParser:
+    name = app.current().name
+    if app.current().read_only:
+        sql_kind = "read-only SQL"
+        txn_line = ("Everything runs in a single read-only transaction — the server\n"
+                    "rejects any write (INSERT/UPDATE/DELETE/DDL).")
+    else:
+        sql_kind = "SQL"
+        txn_line = ("Everything runs in a single transaction (commit on success,\n"
+                    "rollback on any error).")
     parser = argparse.ArgumentParser(
-        prog="execute-db",
+        prog=name,
         description=(
-            "Run SQL against one of your configured PostgreSQL environments.\n\n"
+            f"Run {sql_kind} against one of your configured PostgreSQL environments.\n\n"
             "Pick the target with its --<name> flag, and supply the SQL as a quoted\n"
-            "argument, from a file with -f, or piped on stdin. Everything runs in a\n"
-            "single transaction (commit on success, rollback on any error).\n\n"
-            "Run `execute-db --help` for the full overview, including output formats\n"
+            f"argument, from a file with -f, or piped on stdin. {txn_line}\n\n"
+            f"Run `{name} --help` for the full overview, including output formats\n"
             "and the config/password/token commands."
         ),
         epilog='examples:\n'
-               '  execute-db --dev "SELECT * FROM users LIMIT 5"\n'
-               '  execute-db --dev -f migration.sql                run SQL from a file\n'
-               '  execute-db --dev < migration.sql                 same, via stdin\n'
-               '  execute-db --prod -o csv "TABLE users" > out.csv export to CSV\n'
-               '  execute-db --token <TOKEN> "SELECT 1"            use an ephemeral token',
+               f'  {name} --dev "SELECT * FROM users LIMIT 5"\n'
+               f'  {name} --dev -f query.sql                run SQL from a file\n'
+               f'  {name} --dev < query.sql                 same, via stdin\n'
+               f'  {name} --prod -o csv "TABLE users" > out.csv export to CSV\n'
+               f'  {name} --token <TOKEN> "SELECT 1"            use an ephemeral token',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     group = add_env_flags(parser, envs)
     group.add_argument("--token", metavar="TOKEN",
                        help="connect with an ephemeral access token instead of an "
-                            "environment (no password prompt; see `execute-db token --help`)")
+                            f"environment (no password prompt; see `{name} token --help`)")
     parser.add_argument("sql", nargs="?", metavar="SQL",
                         help="the SQL to run, as one quoted argument "
                              "(omit to read from -f FILE or piped stdin)")
@@ -196,7 +205,7 @@ def run(argv: list):
     envs = discover_envs()
     if not envs:
         fail("No environments configured. Create one with "
-             "`execute-db config set <name>`.")
+             f"`{app.current().name} config set <name>`.")
     parser = build_parser(envs)
     args = parser.parse_args(argv)
 

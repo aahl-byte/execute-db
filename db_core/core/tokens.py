@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import app
 from . import crypto, keyring, store, system
 from ..console import fail
 
@@ -62,11 +63,11 @@ def token_path(tid: str) -> Path:
     # cannot escape the ephemeral dir and wipe an arbitrary file.
     if not TOKEN_ID_RE.match(tid):
         fail(f"Invalid token id {tid!r}")
-    return store.EPHEMERAL_DIR / f".env.{tid}"
+    return store.ephemeral_dir() / f".env.{tid}"
 
 
 def share_desc(tid: str) -> str:
-    return f"execute-db:token:{tid}"
+    return f"{app.current().name}:token:{tid}"
 
 
 def token_passphrase(token: str, share: bytes) -> str:
@@ -74,11 +75,12 @@ def token_passphrase(token: str, share: bytes) -> str:
 
 
 def cli_binary():
-    """Absolute path to the execute-db entry point, for systemd units."""
-    candidate = Path(sys.executable).with_name("execute-db")
+    """Absolute path to this app's entry point, for systemd units."""
+    name = app.current().name
+    candidate = Path(sys.executable).with_name(name)
     if candidate.exists():
         return str(candidate)
-    return shutil.which("execute-db")
+    return shutil.which(name)
 
 
 def schedule_token_wipe(ttl_seconds: int) -> bool:
@@ -121,22 +123,23 @@ def install_boot_sweep():
     exe = cli_binary()
     if not exe or not shutil.which("systemctl"):
         return
+    name = app.current().name
     unit_dir = Path.home() / ".config" / "systemd" / "user"
-    service = unit_dir / "execute-db-token-sweep.service"
-    timer = unit_dir / "execute-db-token-sweep.timer"
+    service = unit_dir / f"{name}-token-sweep.service"
+    timer = unit_dir / f"{name}-token-sweep.timer"
     if service.exists() and timer.exists():
         return
     unit_dir.mkdir(parents=True, exist_ok=True)
     service.write_text(
         "[Unit]\n"
-        "Description=Wipe expired execute-db ephemeral tokens\n\n"
+        f"Description=Wipe expired {name} ephemeral tokens\n\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={exe} token sweep\n"
     )
     timer.write_text(
         "[Unit]\n"
-        "Description=Wipe expired execute-db ephemeral tokens after startup\n\n"
+        f"Description=Wipe expired {name} ephemeral tokens after startup\n\n"
         "[Timer]\n"
         "OnStartupSec=2min\n\n"
         "[Install]\n"
@@ -170,7 +173,7 @@ def create_token(env: str, ttl: str) -> TokenResult:
                           persistent=system.in_system_mode())
     passphrase = token_passphrase(token, share if bound else None)
 
-    store.EPHEMERAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store.ephemeral_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
     store.write_encrypted(token_path(tid), crypto.encrypt(text.encode(), passphrase, expiry))
 
     install_boot_sweep()
@@ -187,10 +190,11 @@ def sweep_expired() -> list:
     on every CLI run as a backstop. Never raises.
     """
     wiped = []
-    if not store.EPHEMERAL_DIR.is_dir():
+    eph_dir = store.ephemeral_dir()
+    if not eph_dir.is_dir():
         return wiped
     now = time.time()
-    for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
+    for p in sorted(eph_dir.glob(".env.*")):
         try:
             expiry = crypto.expiry_of(p.read_bytes())
         except (crypto.NotEncryptedError, OSError):
@@ -207,8 +211,9 @@ def sweep_expired() -> list:
 def list_active() -> list:
     """Return [(tid, expiry), ...] for the token files currently on disk."""
     active = []
-    if store.EPHEMERAL_DIR.is_dir():
-        for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
+    eph_dir = store.ephemeral_dir()
+    if eph_dir.is_dir():
+        for p in sorted(eph_dir.glob(".env.*")):
             try:
                 expiry = crypto.expiry_of(p.read_bytes())
             except (crypto.NotEncryptedError, OSError):
@@ -262,10 +267,11 @@ def revoke_all_tokens() -> int:
     removing one environment can't target 'its' tokens; we revoke all of them.
     Best-effort per token so one failure doesn't strand the rest.
     """
-    if not store.EPHEMERAL_DIR.is_dir():
+    eph_dir = store.ephemeral_dir()
+    if not eph_dir.is_dir():
         return 0
     count = 0
-    for p in sorted(store.EPHEMERAL_DIR.glob(".env.*")):
+    for p in sorted(eph_dir.glob(".env.*")):
         tid = p.name.removeprefix(".env.")
         try:
             keyring.remove(share_desc(tid), persistent=system.in_system_mode())

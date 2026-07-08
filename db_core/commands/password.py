@@ -3,6 +3,7 @@
 import argparse
 
 from .flags import add_env_flags, selected_env
+from .. import app
 from ..console import fail
 from ..core import crypto, store
 from ..core.store import discover_envs
@@ -13,7 +14,7 @@ def cmd_set(env: str):
     if not path.exists():
         fail(f"Env file not found: {path}")
     if crypto.is_encrypted(path):
-        fail(f"{path} is already encrypted; use `execute-db password change --{env}`")
+        fail(f"{path} is already encrypted; use `{app.current().name} password change --{env}`")
 
     password = crypto.prompt_password(f"New password for '{env}': ", confirm=True)
     plaintext = path.read_bytes()
@@ -33,7 +34,7 @@ def cmd_change(env: str):
     if not path.exists():
         fail(f"Env file not found: {path}")
     if not crypto.is_encrypted(path):
-        fail(f"{path} is not encrypted; use `execute-db password set --{env}`")
+        fail(f"{path} is not encrypted; use `{app.current().name} password set --{env}`")
 
     old = crypto.prompt_password(f"Current password for '{env}': ")
     try:
@@ -48,16 +49,17 @@ def cmd_change(env: str):
 
 def build_parser(envs: list) -> argparse.ArgumentParser:
     raw = argparse.RawDescriptionHelpFormatter
+    name = app.current().name
     parser = argparse.ArgumentParser(
-        prog="execute-db password",
+        prog=f"{name} password",
         description=(
             "Encrypt an environment so it can only be used after entering its\n"
             "password on a terminal (AES-256-GCM, scrypt-derived key). There is no\n"
             "password recovery — forget it and you recreate the environment."
         ),
         epilog="examples:\n"
-               "  execute-db password set --dev      # encrypt 'dev' for the first time\n"
-               "  execute-db password change --dev   # rotate 'dev's password",
+               f"  {name} password set --dev      # encrypt 'dev' for the first time\n"
+               f"  {name} password change --dev   # rotate 'dev's password",
         formatter_class=raw,
     )
     sub = parser.add_subparsers(dest="action", required=True, metavar="{set,change}")
@@ -88,8 +90,8 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
 def run(argv: list):
     envs = discover_envs()
     if not envs:
-        fail("No environments configured. Create one with "
-             "`execute-db config set <name>`.")
+        fail(f"No environments configured. Create one with "
+             f"`{app.current().name} config set <name>`.")
     args = build_parser(envs).parse_args(argv)
     try:
         env = selected_env(args, envs)

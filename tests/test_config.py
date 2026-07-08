@@ -1,11 +1,11 @@
 import pytest
 
-from execute_db import console
-from execute_db.commands import config
-from execute_db.commands import exec as exec_cmd
-from execute_db.core import crypto, keyring
-from execute_db.core import store as store_mod
-from execute_db.core import system
+from db_core import console
+from db_core.commands import config
+from db_core.commands import exec as exec_cmd
+from db_core.core import crypto, keyring
+from db_core.core import store as store_mod
+from db_core.core import system
 
 
 # --- prompt_line -------------------------------------------------------------
@@ -57,7 +57,7 @@ def test_config_list_empty(store, capsys):
 
 def test_config_set_creates_encrypted_env(store, monkeypatch):
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://u:p@h/db")
-    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "hunter2")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False, allow_empty=False:"hunter2")
     monkeypatch.setattr(console, "prompt_confirm", lambda q: True)
     config.cmd_set("dev")
 
@@ -73,21 +73,35 @@ def test_config_set_creates_encrypted_env(store, monkeypatch):
 def test_config_set_creates_store_dir_on_first_run(tmp_path, monkeypatch):
     # No `store` fixture: the store dir does not exist yet (fresh machine).
     d = tmp_path / ".execute-db"
-    monkeypatch.setattr(store_mod, "CONFIG_DIR", d)
-    monkeypatch.setattr(store_mod, "CONFIG_FILE", d / "config.json")
+    monkeypatch.setattr(store_mod, "_dir_override", d)
     monkeypatch.setattr(system, "in_system_mode", lambda: False)
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://x")
-    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False, allow_empty=False: "pw")
     monkeypatch.setattr(console, "prompt_confirm", lambda q: True)
     config.cmd_set("dev")
     assert (d / ".env.dev").exists()
     assert oct(d.stat().st_mode)[-3:] == "700"
 
 
+def test_config_set_blank_password_writes_plaintext(store, monkeypatch):
+    # A blank password opts out of encryption: the env is written in plaintext.
+    monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://u:p@h/db")
+    monkeypatch.setattr(crypto, "prompt_password",
+                        lambda p, confirm=False, allow_empty=False: "")
+    monkeypatch.setattr(console, "prompt_confirm", lambda q: True)
+    config.cmd_set("dev")
+
+    path = store / ".env.dev"
+    assert path.exists()
+    assert not crypto.is_encrypted(path)
+    assert oct(path.stat().st_mode)[-3:] == "600"
+    assert path.read_text() == "DATABASE_URL=postgresql://u:p@h/db\n"
+
+
 def test_config_set_replaces_existing(store, monkeypatch):
     (store / ".env.dev").write_bytes(b"old")
     monkeypatch.setattr(crypto, "prompt_line", lambda p: "postgresql://new")
-    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False, allow_empty=False:"pw")
     monkeypatch.setattr(console, "prompt_confirm", lambda q: True)
     config.cmd_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
@@ -96,7 +110,7 @@ def test_config_set_replaces_existing(store, monkeypatch):
 def test_config_set_reprompts_on_bad_url(store, monkeypatch, capsys):
     urls = iter(["mysql://x", "postgresql://ok"])
     monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
-    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False, allow_empty=False:"pw")
     monkeypatch.setattr(console, "prompt_confirm", lambda q: True)
     config.cmd_set("dev")
     assert crypto.is_encrypted(store / ".env.dev")
@@ -107,7 +121,7 @@ def test_config_set_reprompts_when_preview_declined(store, monkeypatch):
     urls = iter(["postgresql://wrong", "postgresql://right"])
     confirms = iter([False, True])
     monkeypatch.setattr(crypto, "prompt_line", lambda p: next(urls))
-    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False: "pw")
+    monkeypatch.setattr(crypto, "prompt_password", lambda p, confirm=False, allow_empty=False:"pw")
     monkeypatch.setattr(console, "prompt_confirm", lambda q: next(confirms))
     config.cmd_set("dev")
     text = crypto.decrypt((store / ".env.dev").read_bytes(), "pw").decode()
