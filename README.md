@@ -30,7 +30,7 @@ pip install git+https://github.com/aahl-byte/execute-db
 
 **The recommended install is hardened ([privilege separation](#hardened-install-privilege-separation)).**  
 - the hardened installation closes a loophole where encrypted token environment files can be copied and decrypted while the token is still live
-- this installs the cli and config files to its own dedicated user to protect reads from other user processes
+- it installs **both** `execute-db` and `explore-db`, each with its cli and config files under its own dedicated service user, to protect reads from other user processes
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.sh | sudo bash
@@ -211,18 +211,20 @@ curl -fsSL https://raw.githubusercontent.com/aahl-byte/execute-db/main/install.s
   | sudo bash -s -- --ref <commit-sha>
 ```
 
+**It hardens both `execute-db` and `explore-db`.** This isn't optional polish: [`explore-db`](#explore-db-read-only-sibling) stores the *same* database credentials, so a plaintext explore-db store would let a same-user agent read the connection string and connect read/write directly — undoing execute-db's hardening. Each tool gets its own service user and store, which also means an `explore-db` (read-only) token is not valid for `execute-db`: read-only access you delegate can't be replayed to write.
+
 Re-running the command upgrades in place; pass `--ref` again to move to a newer reviewed commit. **What it sets up:**
 
-- A system user **`executedb`** owns `/var/lib/execute-db/.execute-db` (mode `0700`). Your encrypted envs and tokens move there — **unreadable to your own account**. Manage them in place with `execute-db config set`/`rm` (the launcher runs the command as `executedb`); no installer re-run is needed to add or change an environment.
-- A **root-owned frozen copy** of the CLI at `/usr/local/lib/execute-db/venv` — your account can't patch the code that handles your password.
-- A locked-down **sudoers** rule lets you run *only* that binary as `executedb` (`env_reset`, no `PYTHONPATH`/`LD_*` passthrough).
-- Decryption and the DB connection happen inside the `executedb` process, whose memory your account cannot ptrace.
+- System users **`executedb`** and **`exploredb`** own `/var/lib/execute-db/.execute-db` and `/var/lib/explore-db/.explore-db` respectively (mode `0700`). Each tool's encrypted envs and tokens move to its own store — **unreadable to your own account**. Manage them in place with `execute-db config set`/`rm` and `explore-db config set`/`rm` (each launcher runs as its service user); no installer re-run is needed to add or change an environment.
+- A **root-owned frozen copy** of the package in one shared venv at `/usr/local/lib/db-cli/venv` (it provides both `execute-db` and `explore-db`) — your account can't patch the code that handles your password.
+- A locked-down **sudoers** rule per tool lets you run *only* that binary as its service user (`env_reset`, no `PYTHONPATH`/`LD_*` passthrough).
+- Decryption and the DB connection happen inside the service-user process, whose memory your account cannot ptrace.
 
-In this mode the CLI **requires every environment to be encrypted** (a plaintext env would have no password gate), refuses `-f` (pipe SQL via stdin instead), caps token TTLs at 24h, and anchors keyring shares in `executedb`'s persistent keyring. Tokens still work for delegation — an agent you hand a token can run its queries — but can no longer copy the file or read the share.
+In this mode each CLI **requires every environment to be encrypted** (a plaintext env would have no password gate), refuses `-f` (pipe SQL via stdin instead), caps token TTLs at 24h, and anchors keyring shares in the service user's persistent keyring. Tokens still work for delegation — an agent you hand a token can run its queries — but can no longer copy the file or read the share.
 
-> **Use the trusted path.** To keep an agent from capturing your password as you type it, always invoke `/usr/local/bin/execute-db` (or a root-owned shell alias), **not** whatever `execute-db` your `PATH` resolves — `PATH` is yours to shadow, so the tool can't guarantee it for you. The auto-redirect (via a marker file) is a convenience, not a security boundary.
+> **Use the trusted path.** To keep an agent from capturing your password as you type it, always invoke `/usr/local/bin/execute-db` / `/usr/local/bin/explore-db` (or a root-owned shell alias), **not** whatever your `PATH` resolves — `PATH` is yours to shadow, so the tool can't guarantee it for you. The auto-redirect (via a marker file) is a convenience, not a security boundary.
 
-Reverse it any time: `sudo ./install.sh --uninstall` (or re-download and run with `--uninstall`), which restores the store to your home directory.
+Reverse it any time: `sudo ./install.sh --uninstall` (or re-download and run with `--uninstall`), which restores both stores to your home directory.
 
 ## Threat model
 
