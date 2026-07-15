@@ -20,6 +20,8 @@ import hashlib
 import time
 from pathlib import Path
 
+import psycopg2
+
 from . import store
 
 # Bump when the document's SHAPE changes. It is part of the cache filename, so a
@@ -117,3 +119,256 @@ def clear_cache() -> int:
         except OSError:
             pass
     return count
+
+
+# One statement -> one document -> one consistent snapshot.
+#
+# `::text` at the end is load-bearing: psycopg2 parses a jsonb result column
+# into a Python dict, which would force a re-serialize and defeat the raw-bytes
+# cache. Casting server-side gives us a str. jsonb::text is already compact.
+#
+# Nulls are deliberately KEPT (no jsonb_strip_nulls): the rigid, fully-populated
+# shape is easier to write a strict typed loader against, and costs ~2MB.
+INTROSPECT_SQL = r"""
+WITH rels AS (
+    SELECT c.oid, n.nspname, c.relname, c.relkind
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND NOT c.relispartition
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\_toast%%'
+      AND n.nspname NOT LIKE 'pg\_temp%%'
+),
+cols AS (
+    SELECT r.oid, jsonb_agg(jsonb_build_object(
+               'name', a.attname,
+               'type', format_type(a.atttypid, a.atttypmod),
+               'not_null', a.attnotnull,
+               'default', pg_get_expr(d.adbin, d.adrelid),
+               'identity', NULLIF(a.attidentity, ''),
+               'generated', NULLIF(a.attgenerated, ''),
+               'position', a.attnum,
+               'comment', col_description(r.oid, a.attnum)
+           ) ORDER BY a.attnum) AS columns
+    FROM rels r
+    JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef d ON d.adrelid = r.oid AND d.adnum = a.attnum
+    GROUP BY r.oid
+),
+cons AS (
+    SELECT c.conrelid AS oid, jsonb_agg(jsonb_build_object(
+               'name', c.conname,
+               'type', CASE c.contype
+                           WHEN 'p' THEN 'primary_key'
+                           WHEN 'f' THEN 'foreign_key'
+                           WHEN 'u' THEN 'unique'
+                           WHEN 'c' THEN 'check'
+                           WHEN 'x' THEN 'exclude'
+                           ELSE c.contype::text END,
+               'definition', pg_get_constraintdef(c.oid),
+               'columns', (SELECT jsonb_agg(a.attname ORDER BY k.ord)
+                           FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+                           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum),
+               'references', CASE WHEN c.contype = 'f' THEN jsonb_build_object(
+                   'table', (SELECT n.nspname || '.' || fc.relname
+                             FROM pg_class fc JOIN pg_namespace n ON n.oid = fc.relnamespace
+                             WHERE fc.oid = c.confrelid),
+                   'columns', (SELECT jsonb_agg(a.attname ORDER BY k.ord)
+                               FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
+                               JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum)
+               ) END
+           ) ORDER BY c.conname) AS constraints
+    FROM pg_constraint c
+    JOIN rels r ON r.oid = c.conrelid
+    GROUP BY c.conrelid
+),
+idx AS (
+    SELECT i.indrelid AS oid, jsonb_agg(jsonb_build_object(
+               'name', ic.relname,
+               'definition', pg_get_indexdef(i.indexrelid),
+               'unique', i.indisunique,
+               'primary', i.indisprimary
+           ) ORDER BY ic.relname) AS indexes
+    FROM pg_index i
+    JOIN pg_class ic ON ic.oid = i.indexrelid
+    JOIN rels r ON r.oid = i.indrelid
+    GROUP BY i.indrelid
+),
+trg AS (
+    SELECT t.tgrelid AS oid, jsonb_agg(jsonb_build_object(
+               'name', t.tgname,
+               'definition', pg_get_triggerdef(t.oid)
+           ) ORDER BY t.tgname) AS triggers
+    FROM pg_trigger t
+    JOIN rels r ON r.oid = t.tgrelid
+    WHERE NOT t.tgisinternal
+    GROUP BY t.tgrelid
+),
+tables AS (
+    SELECT jsonb_agg(jsonb_build_object(
+               'schema', r.nspname,
+               'name', r.relname,
+               'kind', CASE r.relkind
+                           WHEN 'r' THEN 'table'
+                           WHEN 'p' THEN 'partitioned_table'
+                           WHEN 'v' THEN 'view'
+                           WHEN 'm' THEN 'materialized_view'
+                           WHEN 'f' THEN 'foreign_table' END,
+               'comment', obj_description(r.oid, 'pg_class'),
+               'columns', COALESCE(c.columns, '[]'::jsonb),
+               'constraints', COALESCE(k.constraints, '[]'::jsonb),
+               'indexes', COALESCE(x.indexes, '[]'::jsonb),
+               'triggers', COALESCE(g.triggers, '[]'::jsonb),
+               'view_definition', CASE WHEN r.relkind IN ('v', 'm')
+                                       THEN pg_get_viewdef(r.oid, true) END
+           ) ORDER BY r.nspname, r.relname) AS j
+    FROM rels r
+    LEFT JOIN cols c USING (oid)
+    LEFT JOIN cons k USING (oid)
+    LEFT JOIN idx x USING (oid)
+    LEFT JOIN trg g USING (oid)
+),
+enums AS (
+    SELECT jsonb_agg(jsonb_build_object(
+               'schema', n.nspname,
+               'name', t.typname,
+               'values', (SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder)
+                          FROM pg_enum e WHERE e.enumtypid = t.oid),
+               'comment', obj_description(t.oid, 'pg_type')
+           ) ORDER BY n.nspname, t.typname) AS j
+    FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE t.typtype = 'e' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+),
+domains AS (
+    SELECT jsonb_agg(jsonb_build_object(
+               'schema', n.nspname,
+               'name', t.typname,
+               'base_type', format_type(t.typbasetype, t.typtypmod),
+               'not_null', t.typnotnull,
+               'default', t.typdefault,
+               'constraints', (SELECT jsonb_agg(pg_get_constraintdef(c.oid))
+                               FROM pg_constraint c WHERE c.contypid = t.oid)
+           ) ORDER BY n.nspname, t.typname) AS j
+    FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE t.typtype = 'd' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+),
+funcs AS (
+    SELECT jsonb_agg(jsonb_build_object(
+               'schema', n.nspname,
+               'name', p.proname,
+               'kind', CASE p.prokind
+                           WHEN 'f' THEN 'function'
+                           WHEN 'p' THEN 'procedure'
+                           WHEN 'a' THEN 'aggregate'
+                           WHEN 'w' THEN 'window' END,
+               'arguments', pg_get_function_arguments(p.oid),
+               'identity_arguments', pg_get_function_identity_arguments(p.oid),
+               'returns', pg_get_function_result(p.oid),
+               'language', l.lanname,
+               'comment', obj_description(p.oid, 'pg_proc')
+           -- (nspname, proname) is not unique: overloads tie, and a tie orders
+           -- arbitrarily, so an unchanged schema can produce different bytes on
+           -- every refresh. Broken by identity arguments -- a key drawn from the
+           -- document's own visible content rather than an internal oid -- which
+           -- (proname, proargtypes, pronamespace) being uniquely indexed makes
+           -- total.
+           ) ORDER BY n.nspname, p.proname,
+                      pg_get_function_identity_arguments(p.oid)) AS j
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      -- extension-owned functions (PostGIS, pg_trgm, ...) are thousands of
+      -- entries nobody is completing against.
+      --
+      -- classid is load-bearing: oids are unique per catalog, not globally, so
+      -- an unqualified objid = p.oid can match a row describing some other
+      -- catalog's object that happens to share the number -- silently dropping
+      -- a real function from auto-complete.
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                      WHERE d.classid = 'pg_proc'::regclass
+                        AND d.objid = p.oid AND d.deptype = 'e')
+),
+seqs AS (
+    SELECT jsonb_agg(jsonb_build_object(
+               'schema', schemaname,
+               'name', sequencename,
+               'data_type', data_type,
+               'start', start_value,
+               'min', min_value,
+               'max', max_value,
+               'increment', increment_by,
+               'cycle', cycle
+           ) ORDER BY schemaname, sequencename) AS j
+    FROM pg_sequences
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+),
+exts AS (
+    SELECT jsonb_agg(jsonb_build_object('name', extname, 'version', extversion)
+           ORDER BY extname) AS j
+    FROM pg_extension
+)
+SELECT jsonb_build_object(
+    'schema_version', %(schema_version)s::int,
+    'generated_at', now(),
+    'database', current_database(),
+    'server_version', current_setting('server_version'),
+    'schemas', (SELECT jsonb_agg(nspname ORDER BY nspname) FROM pg_namespace
+                WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND nspname NOT LIKE 'pg\_%%'),
+    'tables', COALESCE((SELECT j FROM tables), '[]'::jsonb),
+    'enums', COALESCE((SELECT j FROM enums), '[]'::jsonb),
+    'domains', COALESCE((SELECT j FROM domains), '[]'::jsonb),
+    'functions', COALESCE((SELECT j FROM funcs), '[]'::jsonb),
+    'sequences', COALESCE((SELECT j FROM seqs), '[]'::jsonb),
+    'extensions', COALESCE((SELECT j FROM exts), '[]'::jsonb)
+)::text AS schema
+"""
+
+
+def introspect(database_url: str) -> bytes:
+    """Run the catalog query and return the document as raw JSON bytes.
+
+    ALWAYS read-only, even under execute-db: introspection has no reason to
+    write, so it should be structurally incapable of it rather than trusting the
+    AppSpec flag that `core.query` reads.
+    """
+    conn = psycopg2.connect(
+        database_url,
+        sslmode="require",  # the same posture core.query connects with
+        options="-c default_transaction_read_only=on",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(INTROSPECT_SQL, {"schema_version": SCHEMA_VERSION})
+            # Exactly one row by construction: the final SELECT has no top-level
+            # FROM and reaches every CTE through a scalar subquery, so it yields
+            # one row even against an empty database. fetchone() cannot be None.
+            (document,) = cur.fetchone()
+    finally:
+        # Nothing to commit on either path, and no reason to hold the snapshot
+        # open while an 11MB string is encoded below. Not commit(): this
+        # transaction is structurally incapable of change, so claiming there is
+        # work to keep would be a lie -- core.query commits only because it is
+        # one flow for reads AND writes. In the finally, not on the success path:
+        # relying on close()'s implicit rollback is a psycopg2 disposition detail
+        # that stops being true the day this connection comes from a pool, and
+        # the error path -- where the transaction is aborted -- is exactly where
+        # a pool would care most.
+        try:
+            conn.rollback()
+        finally:
+            # A terminated backend makes rollback() raise too, and an unguarded
+            # throwing rollback ahead of close() would strand the connection
+            # entirely -- the opposite of what the rollback is here to protect.
+            conn.close()
+    # No isinstance(document, str) guard: `::text` makes this a text column (oid
+    # 25), which psycopg2 always decodes with its STRING typecaster. The guard's
+    # only reachable cause would be someone dropping the cast -- and then
+    # psycopg2 yields a dict, which the guard would hand back as-is, silently
+    # breaking the `-> bytes` contract. Failing loudly here, at the cause, beats
+    # a dict escaping into the cache.
+    return document.encode()

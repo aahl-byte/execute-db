@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from db_core import app
 from db_core.core import schema, system, tokens
 
 URL_A = "postgresql://u:p@host/db_a"
@@ -191,3 +192,164 @@ def test_clear_cache_counts_only_what_it_actually_removed(store):
     stubborn.mkdir()
     assert schema.clear_cache() == 1
     assert stubborn.is_dir()
+
+
+# --- introspect --------------------------------------------------------------
+#
+# These fake psycopg2 (the house idiom, from tests/test_explore.py) and so prove
+# the CONNECTION CONTRACT, not the SQL. The SQL itself is exercised against a
+# real database by the integration test.
+
+class _FakeSchemaCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, args=None):
+        self.sql = sql
+        self.args = args
+
+    def fetchone(self):
+        return ('{"tables": []}',)  # psycopg2 hands back str for a ::text column
+
+
+class _FakeSchemaConn:
+    def __init__(self):
+        self.cur = _FakeSchemaCursor()
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def captured_schema_connect(monkeypatch):
+    seen = {}
+
+    def fake_connect(url, **kwargs):
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        seen["conn"] = _FakeSchemaConn()
+        return seen["conn"]
+
+    monkeypatch.setattr(schema.psycopg2, "connect", fake_connect)
+    return seen
+
+
+def test_introspect_returns_raw_bytes(captured_schema_connect):
+    assert schema.introspect(URL_A) == b'{"tables": []}'
+    assert captured_schema_connect["url"] == URL_A
+
+
+def test_introspect_is_read_only_even_under_execute_db(captured_schema_connect):
+    # The execute-db spec is read/write (conftest configures it), but
+    # introspection must be structurally incapable of writing regardless.
+    assert app.current().read_only is False
+    schema.introspect(URL_A)
+    # Asserted whole, as tests/test_explore.py does: an `in` check survives
+    # dropping the `-c ` prefix that libpq needs to accept the setting at all.
+    assert captured_schema_connect["kwargs"]["options"] == "-c default_transaction_read_only=on"
+    assert captured_schema_connect["kwargs"]["sslmode"] == "require"
+
+
+def test_introspect_closes_the_connection(captured_schema_connect):
+    schema.introspect(URL_A)
+    assert captured_schema_connect["conn"].closed is True
+
+
+def test_introspect_closes_the_connection_even_when_the_query_fails(captured_schema_connect, monkeypatch):
+    # The finally is the whole point: a catalog query that raises must not leak
+    # the connection (and its read snapshot) for the rest of the process.
+    def boom(sql, args=None):
+        raise RuntimeError("catalog exploded")
+
+    monkeypatch.setattr(_FakeSchemaCursor, "execute", staticmethod(boom))
+    with pytest.raises(RuntimeError):
+        schema.introspect(URL_A)
+    # Both, not just closed: the aborted transaction is ended here explicitly
+    # rather than left to close()'s implicit rollback.
+    assert captured_schema_connect["conn"].rolled_back is True
+    assert captured_schema_connect["conn"].closed is True
+
+
+def test_introspect_closes_the_connection_even_when_the_rollback_itself_fails(
+    captured_schema_connect, monkeypatch
+):
+    # A terminated backend fails execute() AND rollback(). The other error-path
+    # test cannot see this: its fake rolls back cleanly, so a throwing rollback
+    # sitting ahead of close() would strand the connection with the suite green.
+    def boom(sql, args=None):
+        raise RuntimeError("backend terminated")
+
+    def bad_rollback(self):
+        raise RuntimeError("connection already closed")
+
+    monkeypatch.setattr(_FakeSchemaCursor, "execute", staticmethod(boom))
+    monkeypatch.setattr(_FakeSchemaConn, "rollback", bad_rollback)
+    with pytest.raises(RuntimeError):
+        schema.introspect(URL_A)
+    assert captured_schema_connect["conn"].closed is True
+
+
+def test_introspect_passes_the_schema_version_as_a_parameter(captured_schema_connect):
+    # The document must declare the version this code produces, so it is bound
+    # from the constant rather than baked into the SQL where a bump could miss it.
+    schema.introspect(URL_A)
+    assert captured_schema_connect["conn"].cur.args == {"schema_version": schema.SCHEMA_VERSION}
+
+
+def test_introspect_does_not_hold_the_snapshot_open(captured_schema_connect):
+    # A read-only transaction has nothing to commit; end it explicitly rather
+    # than leaving the snapshot pinned until close() gets around to it.
+    schema.introspect(URL_A)
+    assert captured_schema_connect["conn"].rolled_back is True
+    assert captured_schema_connect["conn"].committed is False
+
+
+def test_introspect_casts_to_text_so_psycopg2_does_not_parse_it():
+    # Without ::text psycopg2 parses jsonb into a dict and the raw-bytes cache
+    # (and its no-parse cache hit) is silently defeated.
+    #
+    # Pinned to the TERMINAL cast, not a bare `"::text" in ...`: the SQL casts
+    # to text elsewhere too (contype::text), so a substring check passes while
+    # the one cast the design rests on is gone.
+    assert schema.INTROSPECT_SQL.rstrip().endswith(")::text AS schema")
+
+
+def test_introspect_refuses_to_hand_back_a_parsed_dict(captured_schema_connect, monkeypatch):
+    # The other half of the ::text contract. If the cast were ever dropped,
+    # psycopg2 yields a dict; introspect must fail loudly at the cause rather
+    # than pass it through and break its own `-> bytes` contract downstream.
+    monkeypatch.setattr(_FakeSchemaCursor, "fetchone", lambda self: ({"tables": []},))
+    with pytest.raises(AttributeError):
+        schema.introspect(URL_A)
+
+
+def test_introspect_sql_survives_psycopg2_percent_formatting():
+    # psycopg2 %-formats the query when args are passed, so every literal % in
+    # a LIKE pattern must be doubled. This is the cheap, DB-free fence for it.
+    assert schema.INTROSPECT_SQL % {"schema_version": 1}
+
+
+def test_introspect_document_declares_every_top_level_key():
+    # The loader is a strict typed reader: a key that quietly stops being built
+    # is a break for it, and the fake cursor above cannot notice.
+    for key in (
+        "schema_version", "generated_at", "database", "server_version",
+        "schemas", "tables", "enums", "domains", "functions", "sequences",
+        "extensions",
+    ):
+        assert f"'{key}'," in schema.INTROSPECT_SQL
