@@ -206,7 +206,7 @@ from . import store
 # cannot tell the difference.
 SCHEMA_VERSION = 1
 
-DEFAULT_MAX_AGE = 15 * 60  # seconds
+DEFAULT_MAX_AGE_SECONDS = 15 * 60  # default --max-age; a schema only moves on migration
 
 
 def cache_key(database_url: str) -> str:
@@ -826,7 +826,7 @@ class SchemaResult:
     cache_written: bool = False
 
 
-def load(database_url: str, max_age: float = DEFAULT_MAX_AGE,
+def load(database_url: str, max_age: float = DEFAULT_MAX_AGE_SECONDS,
          refresh: bool = False) -> SchemaResult:
     """The document for `database_url`, from cache when fresh enough.
 
@@ -1030,7 +1030,7 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
     parser.add_argument("--max-age", metavar="AGE", default=None,
                         help="serve a cached copy only if younger than AGE "
                              f"(45s/30m/2h/1d; default "
-                             f"{schema.DEFAULT_MAX_AGE // 60}m, 0 to bypass)")
+                             f"{schema.DEFAULT_MAX_AGE_SECONDS // 60}m, 0 to bypass)")
     parser.add_argument("--meta", action="store_true",
                         help="report cache status (cached/refreshed) on stderr")
     return parser
@@ -1043,7 +1043,7 @@ def parse_max_age(text: "str | None") -> float:
     token maximum, neither of which applies to a cache lifetime.
     """
     if text is None:
-        return schema.DEFAULT_MAX_AGE
+        return schema.DEFAULT_MAX_AGE_SECONDS
     if text == "0":
         return 0
     return tokens.parse_duration(text, "--max-age")
