@@ -1105,6 +1105,14 @@ def run(argv: list):
             print(f"refreshed in {result.elapsed:.1f}s", file=sys.stderr)
 ```
 
+**Known issue to resolve in this task — a masked `pgcode` silently withholds a real server error.**
+
+Surfaced during Task 5's review. `introspect` ends its transaction in a `finally`, so when the server terminates the backend mid-query, `cur.execute` raises `OperationalError` (which *has* a SQLSTATE) but the subsequent `conn.rollback()` raises `InterfaceError` — and *that* is what propagates. The original survives only as `__context__`.
+
+`query.server_error()` (`core/query.py:80`) keys disclosure off `getattr(exc, "pgcode", None)`, and the masking `InterfaceError` has `pgcode = None`. So in hardened mode this path reports a bare "Schema introspection failed" even though the server did explain itself. `run_query` has the identical masking, so this is a pre-existing repo convention rather than a regression — but the exec path's whole point (commit `976a085`) is that a server-side complaint is safe to disclose.
+
+Decide explicitly: either walk `__context__` when the top-level exception has no `pgcode`, or accept the convention and say so in a comment. Do not leave it undecided.
+
 **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_schema.py -v`
