@@ -9,7 +9,7 @@ import sys
 
 from .. import app, console
 from ..console import fail
-from ..core import crypto, store, tokens
+from ..core import crypto, schema, store, tokens
 
 
 def cmd_list():
@@ -85,6 +85,11 @@ def cmd_rm(alias: str):
     if revoked:
         print(f"Revoked {revoked} outstanding token(s). Rotate the database "
               f"password server-side to fully cut off access.")
+    cleared = schema.clear_cache()
+    if cleared:
+        # Entries are keyed by URL hash, so `rm` cannot pick out "its" entry
+        # without decrypting the env first. The cache is cheap to regenerate.
+        print(f"Cleared {cleared} cached schema document(s).")
 
 
 def build_parser() -> argparse.ArgumentParser:

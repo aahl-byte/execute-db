@@ -3,7 +3,7 @@ import pytest
 from db_core import console
 from db_core.commands import config
 from db_core.commands import exec as exec_cmd
-from db_core.core import crypto, keyring
+from db_core.core import crypto, keyring, schema
 from db_core.core import store as store_mod
 from db_core.core import system
 
@@ -160,6 +160,25 @@ def test_config_rm_wipes_env_and_revokes_tokens(store, monkeypatch):
     assert not (store / ".env.dev").exists()
     assert list(eph.glob(".env.*")) == []          # tokens revoked
     assert removed                                   # key share removal attempted
+
+
+def test_config_rm_clears_the_schema_cache(store, capsys):
+    # Entries are keyed by URL hash, not env name, so `rm` clears all of them --
+    # including one belonging to an environment it is not removing.
+    (store / ".env.dev").write_bytes(b"DATABASE_URL=postgresql://u:p@host/dev\n")
+    schema.write_cache(schema.cache_path("postgresql://u:p@host/dev"), b"{}")
+    schema.write_cache(schema.cache_path("postgresql://u:p@host/prod"), b"{}")
+
+    config.cmd_rm("dev")
+
+    assert list(schema.cache_dir().glob("*.json")) == []
+    assert "Cleared 2 cached schema document(s)." in capsys.readouterr().out
+
+
+def test_config_rm_is_quiet_when_the_cache_is_empty(store, capsys):
+    (store / ".env.dev").write_bytes(b"DATABASE_URL=postgresql://x\n")
+    config.cmd_rm("dev")
+    assert "cached schema" not in capsys.readouterr().out
 
 
 def test_config_rm_unknown_alias(store):
