@@ -521,8 +521,8 @@ WITH rels AS (
     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND NOT c.relispartition
       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND n.nspname NOT LIKE 'pg\_toast%'
-      AND n.nspname NOT LIKE 'pg\_temp%'
+      AND n.nspname NOT LIKE 'pg\_toast%%'
+      AND n.nspname NOT LIKE 'pg\_temp%%'
 ),
 cols AS (
     SELECT r.oid, jsonb_agg(jsonb_build_object(
@@ -722,7 +722,16 @@ def introspect(database_url: str) -> bytes:
         conn.close()
 ```
 
-**NOTE on `%%`:** `INTROSPECT_SQL` is passed with parameters, so psycopg2 runs `%`-formatting over it. Every literal `%` in the SQL must be doubled. `'pg\_%%'` in the `schemas` sub-select is the only one. The `LIKE 'pg\_toast%'` patterns inside `rels` are *not* doubled here because... they must be. **Double every `%` in a LIKE pattern** — `'pg\_toast%%'`, `'pg\_temp%%'`, `'pg\_%%'`. Fix these three in the constant before running Task 11, or psycopg2 raises `IndexError: unsupported format character`.
+**NOTE on `%%` — the trap in this task.** `INTROSPECT_SQL` is executed *with* a parameter (`schema_version`), and psycopg2 runs `%`-formatting over the whole query string whenever args are passed. So **every literal `%` in the SQL must be doubled**, or psycopg2 raises `ValueError: unsupported format character` / `IndexError` at execute time. There are exactly three, all `LIKE` patterns, and all three are already doubled in the constant above: `'pg\_toast%%'` and `'pg\_temp%%'` in `rels`, and `'pg\_%%'` in the `schemas` sub-select. If you add a `LIKE` pattern, double its `%` too.
+
+This is fenced by a unit test that needs no database — `INTROSPECT_SQL % {"schema_version": 1}` must not raise, which is precisely the formatting psycopg2 performs:
+
+```python
+def test_introspect_sql_survives_psycopg2_percent_formatting():
+    # psycopg2 %-formats the query when args are passed, so every literal % in
+    # a LIKE pattern must be doubled. This is the cheap, DB-free fence for it.
+    assert INTROSPECT_SQL % {"schema_version": 1}
+```
 
 **Step 4: Run tests to verify they pass**
 
