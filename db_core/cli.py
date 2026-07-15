@@ -13,6 +13,8 @@ import sys
 from . import app
 from .commands import config, password, token
 from .commands import exec as exec_cmd
+from .commands import schema as schema_cmd
+from .core import schema as schema_core
 from .core import tokens
 from .core.system import maybe_redirect_to_launcher
 
@@ -39,6 +41,11 @@ Output formats (-o/--format, default: table):
   csv       header + rows          list   tab-separated, no header (for cut/awk)
   Only result rows go to stdout; row counts and --meta summaries go to stderr.
 
+Dump the schema as JSON (for editors, linters, and other tools):
+  {name} schema --dev              tables, columns, keys, indexes, enums, ...
+  {name} schema --dev --refresh    re-read it now (e.g. after a migration)
+  Cached for {schema_max_age} by default; only the JSON goes to stdout.
+
 Manage environments (each is a .env.<name> file in ~/{config_dirname}):
   {name} config list               list environments and whether each is encrypted
   {name} config set <name>         create/replace one (prompts for URL + optional password)
@@ -54,7 +61,7 @@ Ephemeral tokens — temporary, password-free access (e.g. for a script or agent
   {name} token revoke <id>              revoke one early
 
   {name} --version                 print the version
-  {name} <command> --help          per-command flags (config/password/token)
+  {name} <command> --help          per-command flags (config/password/token/schema)
 """
 
 
@@ -72,6 +79,9 @@ def _help_fields() -> dict:
         "config_dirname": spec.config_dirname,
         "sql_kind": sql_kind,
         "txn_note": txn_note,
+        # Interpolated, not retyped: `{name} schema --help` reads the same
+        # constant, and two copies of a default only stay equal until one moves.
+        "schema_max_age": f"{schema_core.DEFAULT_MAX_AGE_SECONDS // 60}m",
     }
 
 
@@ -113,5 +123,7 @@ def main():
         password.run(argv[1:])
     elif argv[0] == "token":
         token.run(argv[1:])
+    elif argv[0] == "schema":
+        schema_cmd.run(argv[1:])
     else:
         exec_cmd.run(argv)
