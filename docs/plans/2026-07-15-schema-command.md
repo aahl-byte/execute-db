@@ -1095,7 +1095,10 @@ def run(argv: list):
     sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
 
-    if not result.cache_written and not result.cached:
+    # `is False` means a write was ATTEMPTED and failed. A cache hit leaves this
+    # None (nothing was attempted), and warning there would fire on the common
+    # path -- the surest way to train someone to ignore the warning entirely.
+    if result.cache_written is False:
         print("Warning: the schema could not be cached; the next call will "
               "introspect again.", file=sys.stderr)
     if args.meta:
@@ -1104,6 +1107,14 @@ def run(argv: list):
         else:
             print(f"refreshed in {result.elapsed:.1f}s", file=sys.stderr)
 ```
+
+**`SchemaResult`'s contract, as actually built in Task 6** (the snippet above is updated for it; these are the details that bite):
+
+- `cached` is the one thing to switch on.
+- `cache_written` is a **tri-state**: `True` written, `False` attempted-and-failed, `None` never attempted (a cache hit). Warn only on `is False` — `if not result.cache_written` would fire on every hit.
+- `age` is **best-effort even on a hit.** `load` re-stats the file, and an entry cleared between the read and the stat yields `age=None`. So **`_age_text` needs an age-unknown arm** — `cached (age unknown)` — rather than formatting a None.
+- `elapsed` is the **introspection** time, not wall time from invocation to exit. `refreshed in 2.4s` is honest about the query, which is the useful number, but do not word it as end-to-end.
+- `load` lets `introspect`'s exceptions fly on purpose; catching them and applying the disclosure rules is this task's job.
 
 **Known issue to resolve in this task — a masked `pgcode` silently withholds a real server error.**
 
