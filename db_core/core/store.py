@@ -50,7 +50,7 @@ def ephemeral_dir() -> Path:
 
 
 ENV_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-RESERVED_NAMES = {"password", "token", "config", "file", "f", "help", "sql"}
+RESERVED_NAMES = {"password", "token", "config", "schema", "file", "f", "help", "sql"}
 
 
 def env_file_path(env: str) -> Path:
