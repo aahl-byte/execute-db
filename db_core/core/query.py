@@ -52,3 +52,36 @@ def run_query(database_url: str, sql: str) -> QueryResult:
         raise
     finally:
         conn.close()
+
+
+def server_error(exc: Exception) -> "str | None":
+    """The server's own complaint about a statement, or None if it wasn't one.
+
+    Splits psycopg2 failures into the only two kinds that matter for disclosure:
+
+    - A **server-side** error carries a SQLSTATE (`pgcode`) and a
+      `diag.message_primary` describing the statement — 'syntax error at or near
+      "SELEKT"', 'relation "users" does not exist'. It names nothing but the
+      caller's own SQL, so it is safe to hand back even over sudo.
+    - A **connection-level** failure has no SQLSTATE, and its text can echo the
+      connection string: 'could not translate host name "db-internal" to
+      address'. That is the leak the hardened path exists to prevent, so the
+      caller keeps withholding it.
+
+    Both conditions below are load-bearing even though measured psycopg2 errors
+    happen to satisfy them together: `pgcode` is the documented "the server
+    answered" signal, and an empty `diag` must never render as "None".
+
+    Built from `diag`, never `str(exc)`: str() of a server error also carries
+    LINE/caret context, and restricting the result to the server's own primary
+    message (plus its hint, which is guidance, not data) means nothing except
+    the server's words can ever escape.
+    """
+    if getattr(exc, "pgcode", None) is None:
+        return None
+    diag = getattr(exc, "diag", None)
+    primary = getattr(diag, "message_primary", None)
+    if not primary:
+        return None
+    hint = getattr(diag, "message_hint", None)
+    return f"{primary} ({hint})" if hint else primary

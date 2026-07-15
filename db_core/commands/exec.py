@@ -234,9 +234,14 @@ def run(argv: list):
         _print_result(query.run_query(database_url, sql),
                       args.format, args.meta, args.pager)
     except Exception as e:
-        # In system mode the agent sees this over sudo; psycopg2 errors can echo
-        # host/user/dbname. Keep the detail for interactive user-mode debugging.
+        # Over sudo the caller may be an agent, and a psycopg2 CONNECTION error
+        # can echo host/user/dbname — so that detail stays withheld. But a
+        # SERVER-side error (one with a SQLSTATE) only ever describes the
+        # caller's own SQL, and withholding *that* made the tool unusable for
+        # the one thing it exists to do: fix your query. See query.server_error
+        # for exactly where the line falls.
         if in_system_mode():
-            fail("Query failed")
+            detail = query.server_error(e)
+            fail(f"Query failed: {detail}" if detail else "Query failed")
         print(f"Query failed: {e}", file=sys.stderr)
         sys.exit(1)
