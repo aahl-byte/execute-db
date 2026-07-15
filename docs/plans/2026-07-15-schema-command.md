@@ -1444,3 +1444,27 @@ env 'meta' + --meta  ->  ArgumentError: argument --meta: conflicting option stri
 **2. `test_config_set_rejects_bad_alias` is decorative — it passes regardless of `RESERVED_NAMES`.**
 
 Under pytest there is no TTY, so `cmd_set()` reaches `read_connection_url` → `NoTTYError` → `fail()` → `SystemExit` for *any* alias, reserved or not. Its `"token"` and `"config"` cases prove nothing, and a totally unreserved valid alias passes the same test. This is live in the suite today. Task 7's tests deliberately exercise `store.validate_alias` directly to avoid the trap; the `test_config.py` test itself was left alone as out of scope.
+
+**3. `schema` cannot write its stdout: a failed write escapes as a traceback. Task 9's handler must catch `OSError`, not just `BrokenPipeError`.**
+
+Two triggers, both ordinary for this command, both measured:
+
+```
+explore-db schema --dev | head -c 60    -> data delivered, then:
+   BrokenPipeError: [Errno 32] Broken pipe        (schema.py, buffer.write)
+execute-db schema --dev > /dev/full     -> traceback, exit code varies (1 or 120,
+   OSError: [Errno 28] No space left on device     depending on whether the write
+                                                   or the interpreter-exit flush
+                                                   is what fails)
+```
+
+The exec path handles the *identical* ENOSPC scenario cleanly — `Query failed: [Errno 28] No space left on device`, exit 1 — because its `try` covers `_print_result` (`exec.py:233-247`). `schema`'s narrow `try` covers only `load()`, so the write is unprotected. The narrow `try` is **correct and should stay**: widening it to cover the write would put the emit inside a handler that reports database-disclosure errors, which the write is not.
+
+Why this is not cosmetic, unlike a broken pipe on a 3-row table:
+- **11.7MB to a file is this command's normal usage** (`schema --dev > schema.json`), so ENOSPC is a routine failure, not an exotic one — and unlike a broken pipe, the reader did *not* get the bytes it asked for.
+- **An external tool gets an exit code it cannot classify** (1 vs 120 vs traceback-on-stderr), which defeats the point of a machine-readable interface.
+- **In hardened mode the traceback prints the service user's install path** — the one thing this branch's disclosure work exists to prevent. `exec.py`'s `except Exception` suppresses it; `schema` has nothing there to do so.
+
+**Task 9: catch `OSError` at `cli.py:main`**, mapping it to one stderr line plus exit 1. `BrokenPipeError` is a subclass of `OSError` (via `ConnectionError`), so a single handler covers both triggers, and both commands inherit it. Scoping the handler to `BrokenPipeError` would fix the harmless case and leave the harmful one. Deliberately not fixed inside `commands/schema.py`: catching it there would leave the two commands disagreeing about what a failed write means, and the honest fix is one shared handler.
+
+**4. `require_envs()` — the no-envs guard is now copied verbatim three times** (`exec.py:205`, `token.py:126`, `schema.py`). It belongs in `commands/flags.py` beside `add_env_flags`. Not done in Task 8: it modifies two commands outside that task's scope, and unlike the `query.py` change on this branch it is a DRY refactor rather than a bug fix, so it does not clear the bar for widening a task's blast radius.
