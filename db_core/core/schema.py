@@ -18,6 +18,7 @@ is why stdout, not the file, is the interface.
 
 import hashlib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg2
@@ -30,6 +31,31 @@ from . import store
 SCHEMA_VERSION = 1
 
 DEFAULT_MAX_AGE_SECONDS = 15 * 60  # default --max-age; a schema only moves on migration
+
+
+@dataclass
+class SchemaResult:
+    """A document, plus how it was come by.
+
+    `cached` is the one thing to switch on; the rest is detail for `--meta` to
+    print. `elapsed` and `cache_written` are meaningful in exactly one branch --
+    a cache hit introspected nothing to time and wrote nothing -- and default to
+    None outside it, so None reads as "not that branch" rather than as a value.
+    `cache_written=False` therefore means an attempt that FAILED, never "no
+    attempt": a caller warning on a failed write wants `is False`, which a hit's
+    None must not trip.
+
+    `age` is the exception: it is best-effort even on a hit (see load), so
+    `age is None` does NOT mean "not cached" -- only `cached` answers that.
+    """
+
+    document: bytes  # raw JSON, exactly as Postgres produced it
+    cached: bool  # served from disk without connecting?
+    # seconds since fetch, when cached; None if it could not be stat'd
+    age: "float | None" = None
+    elapsed: "float | None" = None  # seconds spent introspecting, when not cached
+    # write succeeded? None when none was ATTEMPTED (cache hit)
+    cache_written: "bool | None" = None
 
 
 def cache_key(database_url: str) -> str:
@@ -372,3 +398,50 @@ def introspect(database_url: str) -> bytes:
     # breaking the `-> bytes` contract. Failing loudly here, at the cause, beats
     # a dict escaping into the cache.
     return document.encode()
+
+
+def load(database_url: str, max_age: float = DEFAULT_MAX_AGE_SECONDS,
+         refresh: bool = False) -> SchemaResult:
+    """The document for `database_url`, from cache when fresh enough.
+
+    `refresh` and `max_age=0` both mean "do not serve me a cached document";
+    either way the fresh one is still cached on the way out, so bypassing the
+    read never costs the NEXT caller a connection.
+
+    Introspection failures are raised, not caught: the caller decides how much
+    of a database error it may disclose, and it cannot decide that about an
+    exception this function has already swallowed. Nothing is written until the
+    document is in hand, so a failure leaves the previous entry untouched.
+    """
+    path = cache_path(database_url)
+    # One decision, not two conditions: `refresh` and `max_age=0` are the same
+    # idea to this function, so they collapse into the one question it asks.
+    #
+    # max_age=0 must not reach read_cache. There it would "work" only by
+    # arithmetic accident -- `0 <= age <= 0` misses because an age is never
+    # exactly 0.0 -- making bypass a property a reader has to derive rather than
+    # read, and overloading max_age with a second job it explicitly disclaims
+    # (see read_cache). Deciding it here also spares a pointless stat().
+    if not refresh and max_age > 0:
+        document = read_cache(path, max_age)
+        if document is not None:
+            # A second stat, on purpose: `age` exists only for `--meta` to print,
+            # and one syscall is a better price than widening read_cache's
+            # signature to carry a number its other callers do not want. The
+            # price is that an entry cleared between the read and this stat
+            # reports age=None -- honest, and a served document with an unknown
+            # age beats failing over a number nothing depends on.
+            return SchemaResult(document=document, cached=True, age=cache_age(path))
+
+    # monotonic, not time(): this is a duration, and wall time can step under
+    # NTP mid-introspection and report a refresh that took seconds as negative.
+    # cache_age() reads time() because it compares against an mtime, which is
+    # wall time by definition; nothing here has to agree with the filesystem.
+    started = time.monotonic()
+    document = introspect(database_url)
+    # The introspection only -- the caller waits on the database, not on the
+    # write, and the write is milliseconds against seconds. Timing both would
+    # blame the disk for the query's cost, or the query for the disk's.
+    elapsed = time.monotonic() - started
+    return SchemaResult(document=document, cached=False, elapsed=elapsed,
+                        cache_written=write_cache(path, document))

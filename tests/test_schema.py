@@ -353,3 +353,150 @@ def test_introspect_document_declares_every_top_level_key():
         "extensions",
     ):
         assert f"'{key}'," in schema.INTROSPECT_SQL
+
+
+# --- load --------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_introspect(monkeypatch):
+    """Stand in for the database, and record every connection load makes."""
+    calls = []
+
+    def _introspect(url):
+        calls.append(url)
+        return b'{"tables": ["fresh"]}'
+
+    monkeypatch.setattr(schema, "introspect", _introspect)
+    return calls
+
+
+def test_load_miss_introspects_and_caches(store, fake_introspect):
+    result = schema.load(URL_A)
+    assert result.document == b'{"tables": ["fresh"]}'
+    assert result.cached is False
+    assert result.cache_written is True
+    assert result.elapsed is not None
+    assert result.age is None  # a document just fetched has no age to report
+    assert fake_introspect == [URL_A]
+    assert schema.cache_path(URL_A).exists()
+
+
+def test_load_hit_serves_cache_without_connecting(store, fake_introspect):
+    schema.write_cache(schema.cache_path(URL_A), b'{"tables": ["cached"]}')
+    result = schema.load(URL_A)
+    assert result.document == b'{"tables": ["cached"]}'
+    assert result.cached is True
+    assert result.age is not None
+    assert result.elapsed is None  # nothing was introspected, so nothing to time
+    # None, not False: nothing was ATTEMPTED. A caller warning on a failed cache
+    # write spells that `is False`, and a hit must not trip it.
+    assert result.cache_written is None
+    assert fake_introspect == []  # never touched the database
+
+
+def test_load_refresh_bypasses_a_fresh_cache(store, fake_introspect):
+    schema.write_cache(schema.cache_path(URL_A), b'{"tables": ["cached"]}')
+    result = schema.load(URL_A, refresh=True)
+    assert result.document == b'{"tables": ["fresh"]}'
+    assert fake_introspect == [URL_A]
+    # Bypassing the cache READ still refreshes the entry -- the half of "bypass"
+    # that only prose defended. A bypass that skipped the write would leave the
+    # stale document on disk for the NEXT caller to be served, which is the
+    # opposite of what --refresh is for. Asserted on the file, not just the
+    # flag: cache_written=True while the bytes stayed stale is the same bug.
+    assert result.cache_written is True
+    assert schema.cache_path(URL_A).read_bytes() == b'{"tables": ["fresh"]}'
+
+
+def test_load_max_age_zero_always_introspects(store, fake_introspect):
+    schema.write_cache(schema.cache_path(URL_A), b'{"tables": ["cached"]}')
+    result = schema.load(URL_A, max_age=0)
+    assert result.document == b'{"tables": ["fresh"]}'
+    # The same promise on the other bypass: max-age 0 is "do not SERVE me a
+    # cached document", not "do not maintain the cache".
+    assert result.cache_written is True
+    assert schema.cache_path(URL_A).read_bytes() == b'{"tables": ["fresh"]}'
+
+
+def test_load_bypass_is_control_flow_not_arithmetic(store, fake_introspect, monkeypatch):
+    # The test above passes for the WRONG implementation. Handing max_age=0 to
+    # read_cache also yields a miss -- but only because `0 <= age <= 0` demands
+    # an age of exactly 0.0, i.e. by the arithmetic accident of time.time()
+    # never equalling st_mtime. Ask the question that pins the design instead:
+    # was the cache consulted at all? Both bypasses must answer no.
+    schema.write_cache(schema.cache_path(URL_A), b'{"tables": ["cached"]}')
+    consulted = []
+    real_read_cache = schema.read_cache
+
+    def spy(path, max_age):
+        consulted.append(max_age)
+        return real_read_cache(path, max_age)
+
+    monkeypatch.setattr(schema, "read_cache", spy)
+    assert schema.load(URL_A, max_age=0).document == b'{"tables": ["fresh"]}'
+    assert consulted == []
+    assert schema.load(URL_A, refresh=True).document == b'{"tables": ["fresh"]}'
+    assert consulted == []
+
+
+def test_load_stale_cache_reintrospects(store, fake_introspect):
+    path = schema.cache_path(URL_A)
+    schema.write_cache(path, b'{"tables": ["cached"]}')
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    assert schema.load(URL_A, max_age=60).document == b'{"tables": ["fresh"]}'
+
+
+def test_load_still_serves_when_the_cache_cannot_be_written(store, fake_introspect,
+                                                            monkeypatch):
+    monkeypatch.setattr(schema, "write_cache", lambda p, d: False)
+    result = schema.load(URL_A)
+    assert result.document == b'{"tables": ["fresh"]}'  # serving is the job
+    assert result.cache_written is False
+
+
+class _JumpingClock:
+    """A wall clock stepping backwards, with the real monotonic clock beside it."""
+
+    def __init__(self):
+        self._wall = 5000.0
+
+    def time(self):
+        self._wall -= 1000.0  # every read lands further in the past
+        return self._wall
+
+    def monotonic(self):
+        return time.monotonic()
+
+
+def test_load_measures_elapsed_on_a_clock_that_cannot_jump(store, fake_introspect,
+                                                           monkeypatch):
+    # elapsed is a DURATION, so it comes off the monotonic clock. Wall time can
+    # step backwards (NTP) mid-introspection and make a refresh that took two
+    # seconds report as "refreshed in -1000.0s". This module already treats
+    # clock skew as real -- read_cache misses on a future mtime for it -- so the
+    # same skew must not be able to reach --meta's timing either.
+    monkeypatch.setattr(schema, "time", _JumpingClock())
+    result = schema.load(URL_A)
+    assert result.elapsed >= 0
+
+
+def test_load_leaves_the_cache_untouched_when_introspection_fails(store, monkeypatch):
+    # load deliberately lets introspect's exceptions fly -- the command layer
+    # owns the disclosure rules. What load still owes is that a failed refresh
+    # destroys nothing: the previous entry survives for the next run to serve,
+    # and no half-written document is left where it would be served as truth.
+    path = schema.cache_path(URL_A)
+    schema.write_cache(path, b'{"tables": ["cached"]}')
+    old = time.time() - 3600
+    os.utime(path, (old, old))  # stale, so load will try to refresh it
+
+    def boom(url):
+        raise RuntimeError("could not translate host name")
+
+    monkeypatch.setattr(schema, "introspect", boom)
+    with pytest.raises(RuntimeError):
+        schema.load(URL_A, max_age=60)
+    assert path.read_bytes() == b'{"tables": ["cached"]}'
+    assert list(schema.cache_dir().glob("*.tmp")) == []
