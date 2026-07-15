@@ -155,20 +155,26 @@ def test_a_command_that_exits_cleanly_is_untouched(monkeypatch, capsys):
 
 
 def test_console_fail_still_reports_its_own_message(monkeypatch, capsys):
-    # SystemExit is not an OSError, so every command that already fails through
-    # console.fail() keeps its specific message. Guards against the broad catch
-    # flattening the existing commands' errors into the generic line.
+    """config/password/token all fail through console.fail(); the broad catch
+    must leave every one of those messages exactly as it was.
+
+    Asserting only that the message is still THERE is not enough: widen the
+    catch to BaseException and SystemExit lands in it too, appending a nonsense
+    `execute-db: 1` (the exit code, stringified) after the real message -- and a
+    substring check sails straight past it. So pin the WHOLE of stderr.
+    """
     from db_core.console import fail
+    message = "No environments configured. Create one with `execute-db config set <name>`."
 
     def boom(argv):
-        fail("No environments configured. Create one with `execute-db config set <name>`.")
+        fail(message)
 
     monkeypatch.setattr(core_cli.schema_cmd, "run", boom)
     monkeypatch.setattr(cli.sys, "argv", ["execute-db", "schema", "--dev"])
     with pytest.raises(SystemExit) as excinfo:
         cli.main()
     assert excinfo.value.code == 1
-    assert "No environments configured" in capsys.readouterr().err
+    assert capsys.readouterr().err == message + "\n"
 
 
 # --- the interpreter-exit flush ----------------------------------------------
