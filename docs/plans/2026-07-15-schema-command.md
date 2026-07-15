@@ -1472,3 +1472,28 @@ Why this is not cosmetic, unlike a broken pipe on a 3-row table:
 **Exit-code note:** both 1 and 120 are reachable and the mechanism is the 8KB `BufferedWriter`. Below it, `write()` only buffers, the explicit `flush()` raises, the buffer *retains* the bytes, and the interpreter-exit flush of the `TextIOWrapper` fails again — 120 overrides 1. Above it, `write()` performs the raw syscall and raises with nothing retained, so the exit flush never fires — 1. An 11.7MB document takes the second path; an empty database's few hundred bytes takes the first.
 
 **4. `require_envs()` — the no-envs guard is now copied verbatim three times** (`exec.py:205`, `token.py:126`, `schema.py`). It belongs in `commands/flags.py` beside `add_env_flags`. Not done in Task 8: it modifies two commands outside that task's scope, and unlike the `query.py` change on this branch it is a DRY refactor rather than a bug fix, so it does not clear the bar for widening a task's blast radius.
+
+**5. A `print()`-based stdout write CANNOT be caught by any `try` around it, so Task 9's handler does not cover `--help`/`--version`/the exec path. Note 3's claim about the exec path is only true above 8KB.**
+
+Found while verifying Task 9's handler end to end, and **pre-existing** — measured identical on `86b3033` with no handler at all:
+
+```
+explore-db --help > /dev/full   -> exit 120, and the handler never fires:
+   Exception ignored in: <_io.TextIOWrapper name='<stdout>' ...>
+   OSError: [Errno 28] No space left on device
+```
+
+The mechanism is the same 8KB `BufferedWriter` as note 3's exit-code note, applied to the *other* side of it. `print()` only **buffers**; it does not flush. So below 8KB nothing raises inside `main()` at all — the failure first surfaces in the interpreter's exit-time flush, long after any `except` has gone out of scope. Measured directly:
+
+```
+python -c "try: print('small')
+           except OSError: ..."   > /dev/full   -> except never fires, exit 120
+python -c "try: print('x'*20000)
+           except OSError: ..."   > /dev/full   -> except CATCHES, exit 0
+```
+
+Consequences:
+- **Task 9's handler is narrower than "any failed stdout write."** It covers `commands/schema.py` because that command explicitly calls `sys.stdout.buffer.flush()`, which raises inside the `try`. It does **not** cover `--help`, `--version`, or anything else that reaches stdout via `print()` and returns normally.
+- **Note 3 overstates the exec path.** "The exec path handles the identical ENOSPC scenario cleanly — `Query failed: [Errno 28] …`, exit 1 — because its `try` covers `_print_result`" holds only when the rendered output exceeds 8KB. A small result set buffers, `exec.py:236`'s `except Exception` never fires, and the caller gets exit 120 plus `Exception ignored` — the same defect note 3 opened for `schema`.
+
+Not fixed in Task 9. The one-line remedy (`sys.stdout.flush()` inside the handler's `try`) is tempting but decides two things this plan has not: it would give the exec path *two different messages for one failure* depending on payload size (the generic `execute-db: [Errno 28] …` under 8KB, `Query failed: [Errno 28] …` over it), and it still would not cover the `SystemExit` paths (`schema --help > /dev/full`, argparse), so it half-closes the gap while widening Task 9 into a command it does not own. By follow-up 4's own bar, that does not clear it. The honest fix is one decision about where *all* stdout writes get flushed and who reports them.

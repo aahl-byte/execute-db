@@ -8,6 +8,7 @@ active `AppSpec` — see `db_core.app`. The front-end installs that spec, then
 calls `main()`.
 """
 
+import os
 import sys
 
 from . import app
@@ -89,7 +90,58 @@ def print_top_level_help():
     print(TOP_LEVEL_HELP.format(**_help_fields()))
 
 
+def _silence_stdout_at_exit():
+    """Point stdout at /dev/null so the interpreter-exit flush cannot re-fire.
+
+    Below the 8KB BufferedWriter a failed write is still BUFFERED: `write()` only
+    buffers, the explicit `flush()` raises, and the bytes REMAIN — so the
+    interpreter's own exit-time flush of the TextIOWrapper hits the same error a
+    second time. That prints `Exception ignored in: <_io.TextIOWrapper ...>`
+    AFTER this handler already reported the failure, and replaces our exit 1
+    with 120. Redirecting the fd turns that second flush into a successful write
+    to nowhere. Above 8KB the raw write raises with nothing retained, the exit
+    flush never fires, and this is a harmless no-op. Both sizes are measured and
+    pinned by tests/test_cli.py::test_a_failed_write_leaves_no_shutdown_noise.
+    """
+    # This runs while reporting another error and must never raise over it:
+    # `fileno()` gives io.UnsupportedOperation (an OSError) when stdout is not a
+    # real fd, and a plain ValueError when it is already closed.
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
 def main():
+    """Route one invocation, mapping a failed stdout write to one line + exit 1.
+
+    The handler lives here, not in the front-ends (`execute_db/cli.py`,
+    `explore_db/cli.py`): those are two thin copies of the same three lines, so a
+    handler there would be duplicated and free to drift, and every command
+    dispatched below inherits this one for nothing.
+    """
+    try:
+        _run()
+    except OSError as e:
+        # Two ordinary things land here, both from the emit in
+        # commands/schema.py that sits outside that command's try on purpose (it
+        # reports database-disclosure errors; a failed write is not one):
+        # `schema --dev > schema.json` onto a full disk, and `schema --dev |
+        # head` closing the pipe. BrokenPipeError is an OSError, so one handler
+        # covers both, and a traceback here would print the service user's
+        # install path in hardened mode.
+        #
+        # The message is GENERIC and does NOT name the write: this catch is also
+        # broad enough to see a store OSError (an unreadable .env.dev), and
+        # calling that "could not write to stdout" would be exactly the
+        # mislabelling that test_schema.py's store/introspection boundary test
+        # exists to prevent, relocated one layer up.
+        print(f"{app.current().name}: {e}", file=sys.stderr)
+        _silence_stdout_at_exit()
+        sys.exit(1)
+
+
+def _run():
     maybe_redirect_to_launcher()
 
     spec = app.current()
