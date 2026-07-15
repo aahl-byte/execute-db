@@ -1426,3 +1426,21 @@ git commit -m "docs: document the schema command"
 - [ ] Nothing but JSON on stdout — `explore-db schema --dev | python -m json.tool > /dev/null` succeeds.
 - [ ] `config rm` clears the cache.
 - [ ] README documents the command.
+
+---
+
+## Follow-ups found during implementation (NOT this plan's scope)
+
+Both are **pre-existing**, found while implementing Task 7, and neither is caused by the `schema` command. Recorded so they are decided rather than forgotten.
+
+**1. `RESERVED_NAMES` is hand-maintained and already incomplete — an env named after a long flag is a hard crash.**
+
+```
+env 'meta' + --meta  ->  ArgumentError: argument --meta: conflicting option string: --meta
+```
+
+`meta`, `format`, and `no-pager` are exec-path flags that are not reserved; `version` is dispatched as a bare subcommand at `cli.py:93` and is not reserved either. `schema --refresh` / `--max-age` widen the set of colliding names by two more (scoped to that subparser). Nothing was added speculatively: the trigger requires naming an env exactly `refresh`/`max-age`, and the failure is loud rather than silent. The right fix is structural — derive the reserved set from the parsers, or catch `ArgumentError` and fail with a real message — not another hand-added string.
+
+**2. `test_config_set_rejects_bad_alias` is decorative — it passes regardless of `RESERVED_NAMES`.**
+
+Under pytest there is no TTY, so `cmd_set()` reaches `read_connection_url` → `NoTTYError` → `fail()` → `SystemExit` for *any* alias, reserved or not. Its `"token"` and `"config"` cases prove nothing, and a totally unreserved valid alias passes the same test. This is live in the suite today. Task 7's tests deliberately exercise `store.validate_alias` directly to avoid the trap; the `test_config.py` test itself was left alone as out of scope.
