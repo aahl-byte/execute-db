@@ -40,11 +40,21 @@ class TokenResult:
     scheduled: bool   # systemd user timer scheduled to wipe at expiry?
 
 
-def parse_ttl(text: str) -> int:
+def parse_duration(text: str, flag: str) -> int:
+    """Parse a `45s/30m/2h/1d` duration into seconds. Zero is allowed.
+
+    Shared by `--ttl` (which additionally forbids zero and caps in system mode)
+    and by `schema --max-age` (where zero legitimately means "bypass the cache").
+    `flag` only names the option in the error message.
+    """
     m = TTL_RE.match(text)
     if not m:
-        fail(f"Invalid --ttl {text!r} (use e.g. 45s, 30m, 2h, 1d)")
-    seconds = int(m.group(1)) * TTL_UNITS[m.group(2)]
+        fail(f"Invalid {flag} {text!r} (use e.g. 45s, 30m, 2h, 1d)")
+    return int(m.group(1)) * TTL_UNITS[m.group(2)]
+
+
+def parse_ttl(text: str) -> int:
+    seconds = parse_duration(text, "--ttl")
     if seconds <= 0:
         fail(f"Invalid --ttl {text!r}: must be greater than zero")
     if system.in_system_mode() and seconds > system.MAX_SYSTEM_TTL_SECONDS:
