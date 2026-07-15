@@ -1,5 +1,6 @@
 """The `schema` command: introspection, caching, and the CLI surface."""
 
+import json
 import os
 import re
 import time
@@ -7,7 +8,12 @@ import time
 import pytest
 
 from db_core import app
-from db_core.core import schema, system, tokens
+from db_core.commands import schema as schema_cmd
+from db_core.core import crypto, schema, system, tokens
+from db_core.core import store as store_mod
+
+from .conftest import ConnError as _ConnError
+from .conftest import ServerError as _ServerError
 
 URL_A = "postgresql://u:p@host/db_a"
 URL_B = "postgresql://u:p@host/db_b"
@@ -500,3 +506,354 @@ def test_load_leaves_the_cache_untouched_when_introspection_fails(store, monkeyp
         schema.load(URL_A, max_age=60)
     assert path.read_bytes() == b'{"tables": ["cached"]}'
     assert list(schema.cache_dir().glob("*.tmp")) == []
+
+
+# --- parse_max_age -----------------------------------------------------------
+
+def test_parse_max_age_defaults_to_the_engine_default():
+    # None is "the flag was not given", and the default it means lives in the
+    # core module beside load()'s own -- not copied into argparse.
+    assert schema_cmd.parse_max_age(None) == schema.DEFAULT_MAX_AGE_SECONDS
+
+
+def test_parse_max_age_reads_the_duration_grammar():
+    assert schema_cmd.parse_max_age("45s") == 45
+    assert schema_cmd.parse_max_age("30m") == 1800
+    assert schema_cmd.parse_max_age("1d") == 86400
+
+
+def test_parse_max_age_accepts_a_bare_zero_and_a_zero_with_a_unit():
+    # The grammar demands a unit, but zero has none that means anything
+    # different. `0` is the spelling --help documents; `0s` falls out of the
+    # grammar and must not be an error just because it is unusual.
+    assert schema_cmd.parse_max_age("0") == 0
+    assert schema_cmd.parse_max_age("0s") == 0
+
+
+def test_parse_max_age_ignores_the_hardened_ttl_cap(monkeypatch):
+    # A cache lifetime is not a credential lifetime. --ttl is capped in hardened
+    # mode because a token is a key; a stale schema is only stale.
+    monkeypatch.setattr(system, "in_system_mode", lambda: True)
+    assert schema_cmd.parse_max_age("48h") == 172800
+
+
+# --- _age_text ---------------------------------------------------------------
+
+def test_age_text_reads_in_the_units_max_age_is_spelled_in():
+    assert schema_cmd._age_text(0) == "0s"
+    assert schema_cmd._age_text(45.7) == "45s"
+    assert schema_cmd._age_text(60) == "1m"
+    assert schema_cmd._age_text(3599) == "59m"
+    assert schema_cmd._age_text(7200) == "2h"
+    assert schema_cmd._age_text(90000) == "1d"
+
+
+def test_age_text_says_unknown_rather_than_formatting_a_none():
+    # age is best-effort even on a hit: load re-stats the file, and an entry
+    # cleared in between leaves the age unknown while the document it already
+    # read is still perfectly good (see core.schema.load). int(None) is a crash.
+    assert schema_cmd._age_text(None) == "unknown"
+
+
+# --- the command -------------------------------------------------------------
+
+DEV_URL = "postgresql://u:p@host/dev"
+DOC = b'{"tables": ["fresh"]}'
+
+
+@pytest.fixture
+def dev_env(store):
+    (store / ".env.dev").write_text(f"DATABASE_URL={DEV_URL}\n")
+    return store
+
+
+@pytest.fixture
+def load_calls(monkeypatch):
+    """Record what the command asks the engine for. No cache, no database."""
+    calls = []
+
+    def _load(url, max_age=schema.DEFAULT_MAX_AGE_SECONDS, refresh=False):
+        calls.append({"url": url, "max_age": max_age, "refresh": refresh})
+        return schema.SchemaResult(document=DOC, cached=False, elapsed=0.1,
+                                   cache_written=True)
+
+    monkeypatch.setattr(schema, "load", _load)
+    return calls
+
+
+def test_the_document_goes_to_stdout_and_nothing_else_does(dev_env, fake_introspect,
+                                                           capsysbinary):
+    schema_cmd.run(["--dev"])
+    out, err = capsysbinary.readouterr()
+    # Byte equality, not `in`: the consumer pipes this straight into a parser,
+    # so one extra byte on stdout -- a banner, a progress line, a stray print --
+    # breaks it. Equality is what makes that a failure rather than a shrug.
+    assert out == DOC + b"\n"
+    assert json.loads(out) == {"tables": ["fresh"]}
+    assert err == b""
+
+
+def test_the_document_is_copied_verbatim_not_reparsed(dev_env, monkeypatch,
+                                                      capsysbinary):
+    # The cache holds the exact bytes Postgres produced and stdout is a byte
+    # copy of them. A parse-and-re-dump would reorder keys, respace, and unescape
+    # -- and cost seconds on an 11MB document. This document survives none of it.
+    doc = b'{"b":1,"a":2,"t":"caf\\u00e9","z":[ ]}'
+    monkeypatch.setattr(schema, "introspect", lambda url: doc)
+    schema_cmd.run(["--dev"])
+    assert capsysbinary.readouterr()[0] == doc + b"\n"
+
+
+def test_a_second_call_serves_the_cache_and_the_bypasses_do_not(dev_env,
+                                                                fake_introspect):
+    schema_cmd.run(["--dev"])
+    schema_cmd.run(["--dev"])
+    assert fake_introspect == [DEV_URL]        # the hit never connected
+    schema_cmd.run(["--dev", "--refresh"])
+    schema_cmd.run(["--dev", "--max-age", "0"])
+    assert fake_introspect == [DEV_URL] * 3    # both bypasses re-introspected
+
+
+def test_every_flag_reaches_the_engine(dev_env, load_calls):
+    # The seam itself, so a flag that is parsed but dropped on the floor fails
+    # here rather than passing quietly by looking like the default.
+    schema_cmd.run(["--dev"])
+    schema_cmd.run(["--dev", "--refresh"])
+    schema_cmd.run(["--dev", "--max-age", "30m"])
+    schema_cmd.run(["--dev", "--max-age", "0"])
+    assert load_calls == [
+        {"url": DEV_URL, "max_age": schema.DEFAULT_MAX_AGE_SECONDS, "refresh": False},
+        {"url": DEV_URL, "max_age": schema.DEFAULT_MAX_AGE_SECONDS, "refresh": True},
+        {"url": DEV_URL, "max_age": 1800, "refresh": False},
+        {"url": DEV_URL, "max_age": 0, "refresh": False},
+    ]
+
+
+def test_max_age_rejects_nonsense_and_names_the_flag(dev_env, load_calls, capsys):
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev", "--max-age", "soon"])
+    assert "--max-age" in capsys.readouterr().err
+    assert load_calls == []
+
+
+def test_max_age_is_rejected_before_the_environment_is_opened(dev_env, monkeypatch):
+    # `schema --prod --max-age soon` must not prompt for the prod password and
+    # THEN reject the flag. Ordering alone buys this: parse_max_age runs before
+    # anything reaches for a credential. (It exits 1 via console.fail, not 2 via
+    # parser.error -- the same way `token --ttl` rejects a bad duration.)
+    def never(env):
+        raise AssertionError("opened the environment before validating --max-age")
+
+    monkeypatch.setattr(store_mod, "load_database_url", never)
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev", "--max-age", "soon"])
+
+
+# --- --meta ------------------------------------------------------------------
+
+def test_meta_reports_a_refresh_with_the_time_it_took(dev_env, fake_introspect,
+                                                      capsysbinary):
+    schema_cmd.run(["--dev", "--meta"])
+    out, err = capsysbinary.readouterr()
+    assert re.fullmatch(rb"refreshed in \d+\.\d+s\n", err)
+    assert out == DOC + b"\n"   # --meta must never contaminate stdout
+
+
+def test_meta_reports_a_cache_hit_with_its_age(dev_env, fake_introspect,
+                                               capsysbinary):
+    schema_cmd.run(["--dev"])
+    capsysbinary.readouterr()
+    schema_cmd.run(["--dev", "--meta"])
+    out, err = capsysbinary.readouterr()
+    assert re.fullmatch(rb"cached \(age \d+s\)\n", err)
+    assert out == DOC + b"\n"
+    assert fake_introspect == [DEV_URL]
+
+
+def test_meta_says_the_age_is_unknown_rather_than_none(dev_env, monkeypatch,
+                                                       capsysbinary):
+    # The age-unknown arm end to end: a hit whose file vanished before load
+    # could stat it. The document is good, so it is still served in full.
+    monkeypatch.setattr(schema, "load", lambda *a, **k: schema.SchemaResult(
+        document=DOC, cached=True, age=None))
+    schema_cmd.run(["--dev", "--meta"])
+    out, err = capsysbinary.readouterr()
+    assert err == b"cached (age unknown)\n"
+    assert out == DOC + b"\n"
+
+
+# --- the cache-write warning -------------------------------------------------
+
+def test_a_failed_cache_write_warns_but_still_serves(dev_env, fake_introspect,
+                                                     monkeypatch, capsysbinary):
+    monkeypatch.setattr(schema, "write_cache", lambda p, d: False)
+    schema_cmd.run(["--dev"])
+    out, err = capsysbinary.readouterr()
+    assert out == DOC + b"\n"   # serving is the job; caching is the optimization
+    assert b"could not be cached" in err
+
+
+def test_a_cache_hit_does_not_warn_about_a_write_it_never_attempted(
+    dev_env, fake_introspect, capsysbinary
+):
+    # cache_written is a TRI-state: None means no write was ATTEMPTED. Spelling
+    # the warning `if not result.cache_written` fires it on every cache hit --
+    # the common path -- which is the surest way to train someone to ignore a
+    # warning that only ever matters because it is rare.
+    schema_cmd.run(["--dev"])
+    capsysbinary.readouterr()
+    schema_cmd.run(["--dev"])
+    assert capsysbinary.readouterr()[1] == b""
+
+
+# --- picking a target --------------------------------------------------------
+
+def test_a_token_is_used_in_place_of_an_environment(dev_env, fake_introspect,
+                                                    monkeypatch, capsysbinary):
+    monkeypatch.setattr(tokens, "load_database_url_from_token",
+                        lambda t: "postgresql://u:p@host/tokened" if t == "TOK" else None)
+    schema_cmd.run(["--token", "TOK"])
+    assert fake_introspect == ["postgresql://u:p@host/tokened"]
+    assert capsysbinary.readouterr()[0] == DOC + b"\n"
+
+
+def test_an_environment_and_a_token_are_mutually_exclusive(dev_env, load_calls):
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev", "--token", "TOK"])
+    assert load_calls == []
+
+
+def test_a_target_is_required(dev_env, load_calls):
+    with pytest.raises(SystemExit):
+        schema_cmd.run([])
+    assert load_calls == []
+
+
+def test_an_empty_store_guides_the_user(store, capsys):
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])
+    assert "config set" in capsys.readouterr().err
+
+
+def test_an_encrypted_env_without_a_tty_says_so_and_never_connects(
+    store, fake_introspect, capsys
+):
+    # Note this does NOT pin where the try/except boundary sits: the store
+    # signals through console.fail() -> SystemExit, which derives from
+    # BaseException and so escapes `except Exception` wherever the boundary is.
+    # What it pins is the message itself -- an unattended caller is told the env
+    # is encrypted and what to do instead, rather than watching a connection be
+    # attempted with no URL. The boundary is pinned by the test below.
+    (store / ".env.dev").write_bytes(
+        crypto.encrypt(b"DATABASE_URL=postgresql://u:p@host/dev\n", "pw"))
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])            # no TTY under pytest
+    err = capsys.readouterr().err
+    assert "encrypted" in err
+    assert "token create" in err             # the way out, not just the refusal
+    assert fake_introspect == []
+
+
+def test_a_store_failure_is_not_relabelled_as_an_introspection_failure(
+    dev_env, monkeypatch, capsys
+):
+    # THE boundary test. Resolving the URL sits outside the try on purpose, and
+    # only a store failure that skips console.fail() can show it: an OSError out
+    # of read_bytes(), or anything unexpected from dotenv/keyring. Swept inside
+    # the try, this becomes "Schema introspection failed" -- and in hardened mode
+    # is reduced to that bare string, stranding the caller with a lie about the
+    # database and no idea their env file is unreadable.
+    def boom(env):
+        raise OSError("Permission denied: /home/execute-db/.execute-db/.env.dev")
+
+    monkeypatch.setattr(store_mod, "load_database_url", boom)
+    monkeypatch.setattr(schema_cmd, "in_system_mode", lambda: True)
+    with pytest.raises(OSError):
+        schema_cmd.run(["--dev"])
+    assert capsys.readouterr().err != "Schema introspection failed\n"
+
+
+# --- what a failure is allowed to say ----------------------------------------
+#
+# The rule itself lives in query.server_error and is pinned by
+# tests/test_error_disclosure.py; its psycopg2 fakes live in tests/conftest.py.
+# These pin that THIS command applies the rule, the same way the exec path does.
+
+LEAKY = ('could not translate host name "db-internal.example" to address: '
+         "Name or service not known")
+
+
+def _introspection_raises(monkeypatch, exc):
+    def boom(url):
+        raise exc
+
+    monkeypatch.setattr(schema, "introspect", boom)
+
+
+def test_an_introspection_failure_exits_nonzero_and_prints_nothing_to_stdout(
+    dev_env, monkeypatch, capsysbinary
+):
+    _introspection_raises(monkeypatch, _ConnError(LEAKY))
+    with pytest.raises(SystemExit) as e:
+        schema_cmd.run(["--dev"])
+    assert e.value.code == 1
+    out, err = capsysbinary.readouterr()
+    assert out == b""            # a consumer redirecting to a file gets no half-document
+    assert b"Schema introspection failed" in err
+
+
+def test_outside_system_mode_the_whole_error_is_shown(dev_env, monkeypatch, capsys):
+    # Not hardened: the caller owns the machine and the config, so withholding
+    # the connection error would only hide their own typo from them.
+    _introspection_raises(monkeypatch, _ConnError(LEAKY))
+    monkeypatch.setattr(schema_cmd, "in_system_mode", lambda: False)
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])
+    assert "db-internal.example" in capsys.readouterr().err
+
+
+def test_system_mode_withholds_a_connection_error(dev_env, monkeypatch, capsys):
+    # The leak the whole split exists to prevent: over sudo the caller may be an
+    # agent that was never trusted with the host, user, or database name.
+    _introspection_raises(monkeypatch, _ConnError(LEAKY))
+    monkeypatch.setattr(schema_cmd, "in_system_mode", lambda: True)
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])
+    err = capsys.readouterr().err
+    # Exact, not `"db-internal" not in err`: naming the substring only catches
+    # the leak I thought of. Equality catches every one.
+    assert err == "Schema introspection failed\n"
+
+
+def test_system_mode_discloses_a_server_error(dev_env, monkeypatch, capsys):
+    _introspection_raises(monkeypatch,
+                          _ServerError("42501", "permission denied for table pg_class"))
+    monkeypatch.setattr(schema_cmd, "in_system_mode", lambda: True)
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])
+    assert capsys.readouterr().err == (
+        "Schema introspection failed: permission denied for table pg_class\n"
+    )
+
+
+def test_system_mode_discloses_a_server_error_masked_by_a_failed_rollback(
+    dev_env, monkeypatch, capsys
+):
+    # The real shape of a terminated backend, end to end through this command:
+    # introspect's finally rolls back, the rollback raises on the dead
+    # connection, and THAT is what reaches here -- with the server's own words
+    # only reachable through __context__. Reporting a bare "failed" while the
+    # server sat there explaining itself is the failure this command must not
+    # ship with. See query.server_error.
+    original = _ServerError("57P01",
+                            "terminating connection due to administrator command")
+    masked = _ConnError("connection already closed")
+    masked.__context__ = original
+    _introspection_raises(monkeypatch, masked)
+    monkeypatch.setattr(schema_cmd, "in_system_mode", lambda: True)
+    with pytest.raises(SystemExit):
+        schema_cmd.run(["--dev"])
+    assert capsys.readouterr().err == (
+        "Schema introspection failed: terminating connection due to "
+        "administrator command\n"
+    )

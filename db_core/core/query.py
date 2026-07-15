@@ -54,23 +54,16 @@ def run_query(database_url: str, sql: str) -> QueryResult:
         conn.close()
 
 
-def server_error(exc: Exception) -> "str | None":
-    """The server's own complaint about a statement, or None if it wasn't one.
+def _server_message(exc: Exception) -> "str | None":
+    """One exception's own server complaint, or None if it is not one.
 
-    Splits psycopg2 failures into the only two kinds that matter for disclosure:
+    The rule, which `server_error` below applies to a whole chain: a SQLSTATE
+    (`pgcode`) means the server answered, and only what the server said may be
+    disclosed. Without one, disclose nothing.
 
-    - A **server-side** error carries a SQLSTATE (`pgcode`) and a
-      `diag.message_primary` describing the statement — 'syntax error at or near
-      "SELEKT"', 'relation "users" does not exist'. It names nothing but the
-      caller's own SQL, so it is safe to hand back even over sudo.
-    - A **connection-level** failure has no SQLSTATE, and its text can echo the
-      connection string: 'could not translate host name "db-internal" to
-      address'. That is the leak the hardened path exists to prevent, so the
-      caller keeps withholding it.
-
-    Both conditions below are load-bearing even though measured psycopg2 errors
-    happen to satisfy them together: `pgcode` is the documented "the server
-    answered" signal, and an empty `diag` must never render as "None".
+    Both conditions are load-bearing even though measured psycopg2 errors happen
+    to satisfy them together: `pgcode` is the documented "the server answered"
+    signal, and an empty `diag` must never render as "None".
 
     Built from `diag`, never `str(exc)`: str() of a server error also carries
     LINE/caret context, and restricting the result to the server's own primary
@@ -85,3 +78,48 @@ def server_error(exc: Exception) -> "str | None":
         return None
     hint = getattr(diag, "message_hint", None)
     return f"{primary} ({hint})" if hint else primary
+
+
+def server_error(exc: Exception) -> "str | None":
+    """The server's own complaint about a statement, or None if it wasn't one.
+
+    Splits psycopg2 failures into the only two kinds that matter for disclosure:
+
+    - A **server-side** error carries a SQLSTATE (`pgcode`) and a
+      `diag.message_primary` describing the statement — 'syntax error at or near
+      "SELEKT"', 'relation "users" does not exist'. It names nothing but the
+      caller's own SQL, so it is safe to hand back even over sudo.
+    - A **connection-level** failure has no SQLSTATE, and its text can echo the
+      connection string: 'could not translate host name "db-internal" to
+      address'. That is the leak the hardened path exists to prevent, so the
+      caller keeps withholding it.
+
+    The whole __context__ chain is searched, not just the top. Every caller ends
+    its transaction in an except/finally, so a backend the server terminated
+    raises TWICE: the real OperationalError from execute(), then an
+    InterfaceError from the rollback that tried to tidy up after it — and the
+    second, which has no SQLSTATE, is what propagates. The server's own words
+    survive only as `__context__`, and reporting a bare "failed" while they sit
+    there is precisely what this split exists NOT to do.
+
+    Searching deeper does not disclose more: every link faces the same
+    `_server_message` test, so a connection error stays opaque wherever in the
+    chain it sits. `__context__` (implicit chaining) is what a raising
+    except/finally produces; nothing here raises `from`, so `__cause__` would
+    find nothing `__context__` does not.
+    """
+    # CPython breaks context cycles when it chains implicitly, and psycopg2
+    # never assigns __context__ by hand, so `seen` guards a shape production
+    # cannot currently produce. It stays anyway: this is the disclosure gate,
+    # and two lines to ensure it always terminates beats depending on CPython's
+    # chaining rules holding for every exception that ever reaches it.
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        message = _server_message(exc)
+        if message:
+            return message
+        # Only when the top has nothing to say: the top IS the error being
+        # reported, so an older one underneath must never replace it.
+        exc = exc.__context__
+    return None
