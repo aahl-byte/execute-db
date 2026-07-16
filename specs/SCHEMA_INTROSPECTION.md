@@ -135,7 +135,7 @@ is unique first.
 Each function record carries `arg_count` (from `pg_proc.pronargs`) and
 `definition` (the full `CREATE` statement from `pg_get_functiondef`). Both exist
 for the browse child: `arg_count` lets `schema list` show a compact
-`name(...)  # N args`, and `definition` lets `schema show` print the body without
+`name(3 args)`, and `definition` lets `schema show` print the body without
 a second connection (`SCHEMA_BROWSE.md`). `SCHEMA_VERSION` 2 added both, growing
 the document from ~11.7 MB to ~14 MB — ~2 MB of bodies across ~535 functions.
 

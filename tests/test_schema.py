@@ -995,15 +995,20 @@ def test_render_show_function_without_a_body_skips_definition():
 def test_func_summary_is_compact_by_arg_count():
     f = lambda n: {"name": "fn", "arg_count": n}
     assert schema_cmd._func_summary(f(0)) == "fn()"
-    assert schema_cmd._func_summary(f(1)) == "fn(...)  # 1 arg"
-    assert schema_cmd._func_summary(f(3)) == "fn(...)  # 3 args"
+    assert schema_cmd._func_summary(f(1)) == "fn(1 arg)"
+    assert schema_cmd._func_summary(f(3)) == "fn(3 args)"
+
+
+def test_func_summary_degrades_when_arg_count_is_missing():
+    # a pre-v2 cache has no arg_count; show `(...)`, never a false `()`.
+    assert schema_cmd._func_summary({"name": "fn"}) == "fn(...)"
 
 
 def test_render_schema_contents_lists_functions_compactly():
     # billing's two `charge` overloads collapse to compact lines, not full args.
     out = schema_cmd.render_schema_contents(BROWSE_DOC, "billing")
     assert "functions (2):" in out
-    assert "charge(...)  # 1 arg" in out and "charge(...)  # 2 args" in out
+    assert "charge(1 arg)" in out and "charge(2 args)" in out
     # the noisy full argument list stays out of the list view
     assert "amount numeric, currency text" not in out
 

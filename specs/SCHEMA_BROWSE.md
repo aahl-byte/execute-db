@@ -71,10 +71,10 @@ consequences worth holding onto:
 The guiding rule is *compact in the overview, complete on drill-in*. It shows up
 most in functions, which is why the document carries the fields it does.
 
-- `schema list <schema>` renders each function as `name(...)  # N args` (or
-  `name()` for none) via `_func_summary`. The full argument list is deliberately
-  withheld here: a 9-argument signature runs off the screen, and the point of
-  `list` is to scan.
+- `schema list <schema>` renders each function as `name(3 args)` (or `name()`
+  for none) via `_func_summary`. The full argument list is deliberately withheld
+  here: a 9-argument signature runs off the screen, and the point of `list` is to
+  scan.
 - `schema show <function>` prints the real signature(s), the return type,
   language, comment, **and the whole `CREATE` body**.
 

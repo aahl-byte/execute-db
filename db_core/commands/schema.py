@@ -338,16 +338,19 @@ def _render_enum(e: dict) -> str:
 
 
 def _func_summary(f: dict) -> str:
-    """One compact line for `list`: `name(...)  # N args`, or `name()` for none.
+    """One compact line for `list`: `name(3 args)`, or `name()` for none.
 
-    The `...` stands in for the arguments the full signature would spell out;
+    The count stands in for the arguments the full signature would spell out;
     `show` prints those, and the body. A missing arg_count (a pre-v2 cache a
-    consumer somehow kept) degrades to a bare `name(...)` rather than crashing.
+    consumer somehow kept) degrades to a bare `name(...)` rather than claiming
+    zero.
     """
     n = f.get("arg_count")
+    if n is None:
+        return f"{f['name']}(...)"
     if not n:
-        return f"{f['name']}()" if n == 0 else f"{f['name']}(...)"
-    return f"{f['name']}(...)  # {n} arg{'' if n == 1 else 's'}"
+        return f"{f['name']}()"
+    return f"{f['name']}({n} arg{'' if n == 1 else 's'})"
 
 
 def _render_functions(fns: list) -> str:
