@@ -110,6 +110,7 @@ _each_store_file() {
         base="$(basename "$entry")"
         case "$base" in
             SYSTEM|.ephemeral) continue ;;   # marker / uid-bound tokens: don't migrate
+            cache) continue ;;               # schema documents: a dir, and regenerable
             config.json) continue ;;         # legacy index, no longer used
             *.tmp) continue ;;
         esac
