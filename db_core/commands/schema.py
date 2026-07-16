@@ -6,7 +6,7 @@ re-indexes it — so the whole document is served, always, with no projection.
 
 The `list`/`show`/`find` subcommands are the human side of the same cache: an
 easy way to eyeball what schemas, tables, columns, constraints, indexes,
-triggers, functions, enums, and comments a database holds, without dumping 11MB
+triggers, functions, enums, and comments a database holds, without dumping ~14MB
 and reaching for jq. They read the exact same cached document (parsing it costs
 ~0.2s), so they cost a connection only when the cache is cold or stale.
 
@@ -273,8 +273,13 @@ def render_schema_contents(doc: dict, schema_name: str) -> str:
     rels = [t for t in doc["tables"] if t["schema"] == schema_name]
     tables = sorted(t["name"] for t in rels if t["kind"] not in ("view", "materialized_view"))
     views = sorted(t["name"] for t in rels if t["kind"] in ("view", "materialized_view"))
-    funcs = sorted(f"{f['name']}({f['identity_arguments']})"
-                   for f in doc["functions"] if f["schema"] == schema_name)
+    # Compact here on purpose: a full argument list per function runs off the
+    # screen (see the customer schema), and the point of `list` is to scan. The
+    # real signature and body are one `show` away. Sorted by identity arguments
+    # so overloads keep a stable order even though the display collapses them.
+    fns = sorted((f for f in doc["functions"] if f["schema"] == schema_name),
+                 key=lambda f: (f["name"], f["identity_arguments"]))
+    funcs = [_func_summary(f) for f in fns]
     enums = sorted(f"{e['name']} {{{', '.join(e['values'])}}}"
                    for e in doc["enums"] if e["schema"] == schema_name)
 
@@ -332,6 +337,19 @@ def _render_enum(e: dict) -> str:
     return "\n".join(out)
 
 
+def _func_summary(f: dict) -> str:
+    """One compact line for `list`: `name(...)  # N args`, or `name()` for none.
+
+    The `...` stands in for the arguments the full signature would spell out;
+    `show` prints those, and the body. A missing arg_count (a pre-v2 cache a
+    consumer somehow kept) degrades to a bare `name(...)` rather than crashing.
+    """
+    n = f.get("arg_count")
+    if not n:
+        return f"{f['name']}()" if n == 0 else f"{f['name']}(...)"
+    return f"{f['name']}(...)  # {n} arg{'' if n == 1 else 's'}"
+
+
 def _render_functions(fns: list) -> str:
     f0 = fns[0]
     out = [f"function {f0['schema']}.{f0['name']}"
@@ -341,6 +359,12 @@ def _render_functions(fns: list) -> str:
         out.append(f"    returns {f['returns']}  [{f['kind']}, {f['language']}]")
         if f.get("comment"):
             out.append(f"    -- {f['comment']}")
+        # The full CREATE statement, printed as Postgres formats it. Null only
+        # for aggregate/window functions, which have no body to give (see the
+        # guard in core.schema's introspection query).
+        if f.get("definition"):
+            out.append("  definition:")
+            out += [f"    {line}" for line in f["definition"].splitlines()]
     return "\n".join(out)
 
 

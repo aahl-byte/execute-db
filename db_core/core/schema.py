@@ -3,7 +3,7 @@
 The document is produced by ONE catalog query, so it is a consistent snapshot
 rather than a set of moments that disagree. It is cached as the exact bytes
 Postgres returned: a cache hit is a byte copy to stdout with no parse and no
-re-serialize, which is what keeps an 11MB document cheap to serve.
+re-serialize, which is what keeps a ~14MB document cheap to serve.
 
 Pure logic: this module returns bytes and facts. Formatting, flags, and stderr
 chatter are the command layer's job.
@@ -28,7 +28,7 @@ from . import store
 # Bump when the document's SHAPE changes. It is part of the cache filename, so a
 # bump misses the old cache instead of serving a stale shape to a tool that
 # cannot tell the difference.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: functions carry arg_count + definition (the CREATE body)
 
 DEFAULT_MAX_AGE_SECONDS = 15 * 60  # default --max-age; a schema only moves on migration
 
@@ -292,8 +292,15 @@ funcs AS (
                            WHEN 'w' THEN 'window' END,
                'arguments', pg_get_function_arguments(p.oid),
                'identity_arguments', pg_get_function_identity_arguments(p.oid),
+               'arg_count', p.pronargs,
                'returns', pg_get_function_result(p.oid),
                'language', l.lanname,
+               -- The full CREATE statement, so `show` can print the body without
+               -- a second connection. Guarded: pg_get_functiondef RAISES for an
+               -- aggregate or window function ('a'/'w'), so those carry a null
+               -- definition rather than aborting the whole introspection.
+               'definition', CASE WHEN p.prokind IN ('f', 'p')
+                                  THEN pg_get_functiondef(p.oid) END,
                'comment', obj_description(p.oid, 'pg_proc')
            -- (nspname, proname) is not unique: overloads tie, and a tie orders
            -- arbitrarily, so an unchanged schema can produce different bytes on
@@ -376,7 +383,7 @@ def introspect(database_url: str) -> bytes:
             (document,) = cur.fetchone()
     finally:
         # Nothing to commit on either path, and no reason to hold the snapshot
-        # open while an 11MB string is encoded below. Not commit(): this
+        # open while a ~14MB string is encoded below. Not commit(): this
         # transaction is structurally incapable of change, so claiming there is
         # work to keep would be a lie -- core.query commits only because it is
         # one flow for reads AND writes. In the finally, not on the success path:

@@ -67,7 +67,9 @@ def test_help_documents_the_schema_command(monkeypatch, capsys):
     cli.main()
     out = capsys.readouterr().out
     assert "schema --dev" in out
-    assert "schema --dev --refresh" in out
+    assert "schema list --dev" in out
+    assert "schema show public.users --dev" in out
+    assert "schema find email --dev" in out
     # `{name} <command> --help` lists what has one, and schema now does.
     assert "config/password/token/schema" in out
 
@@ -86,7 +88,7 @@ def test_help_interpolates_the_cache_default_rather_than_retyping_it(monkeypatch
     monkeypatch.setattr(cli.sys, "argv", ["execute-db", "--help"])
     cli.main()
     out = capsys.readouterr().out
-    assert "Cached for 45m by default" in out
+    assert "cached for 45m" in out
     assert "15m" not in out
 
 

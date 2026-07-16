@@ -170,6 +170,19 @@ def test_views_carry_their_definition(doc):
     assert view["view_definition"], "a view without its definition is not much of a view"
 
 
+def test_functions_carry_arg_count_and_body(doc):
+    # v2 added both so `list` can stay compact and `show` can print the body
+    # without a second connection. A plpgsql function has both; aggregates carry
+    # a null definition by design (pg_get_functiondef refuses them), so pick a
+    # real function/procedure to observe the body.
+    fn = _first(doc["functions"], lambda f: f["kind"] in ("function", "procedure"),
+                "ordinary functions or procedures")
+    for key in ("arg_count", "definition", "arguments", "identity_arguments"):
+        assert key in fn, f"missing function key: {key}"
+    assert isinstance(fn["arg_count"], int)
+    assert fn["definition"] and fn["definition"].upper().startswith("CREATE")
+
+
 def test_system_schemas_are_excluded(doc):
     # The nspname filters in `rels` and in the `schemas` key. Against a real
     # catalog these are load-bearing -- pg_catalog alone would swamp the

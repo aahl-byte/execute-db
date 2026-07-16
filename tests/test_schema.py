@@ -905,11 +905,15 @@ BROWSE_DOC = {
     "functions": [
         {"schema": "billing", "name": "charge", "kind": "function",
          "arguments": "amount numeric", "identity_arguments": "numeric",
-         "returns": "boolean", "language": "plpgsql", "comment": "bill a card"},
+         "arg_count": 1, "returns": "boolean", "language": "plpgsql",
+         "definition": "CREATE FUNCTION billing.charge(numeric) ...",
+         "comment": "bill a card"},
         {"schema": "billing", "name": "charge", "kind": "function",
          "arguments": "amount numeric, currency text",
-         "identity_arguments": "numeric, text",
-         "returns": "boolean", "language": "plpgsql", "comment": None},
+         "identity_arguments": "numeric, text", "arg_count": 2,
+         "returns": "boolean", "language": "plpgsql",
+         "definition": "CREATE FUNCTION billing.charge(numeric, text) ...",
+         "comment": None},
     ],
     "domains": [], "sequences": [], "extensions": [],
 }
@@ -966,6 +970,42 @@ def test_render_show_function_lists_overloads():
     assert "2 overloads" in out
     assert "amount numeric, currency text" in out
     assert "returns boolean" in out
+
+
+def test_render_show_function_includes_the_definition_body():
+    out = schema_cmd.render_show(BROWSE_DOC, "billing.charge")
+    assert "definition:" in out
+    # both overloads' bodies, indented under the signature
+    assert "CREATE FUNCTION billing.charge(numeric) ..." in out
+    assert "CREATE FUNCTION billing.charge(numeric, text) ..." in out
+
+
+def test_render_show_function_without_a_body_skips_definition():
+    # an aggregate carries a null definition (pg_get_functiondef refuses it)
+    doc = {**BROWSE_DOC, "functions": [
+        {"schema": "public", "name": "my_agg", "kind": "aggregate",
+         "arguments": "integer", "identity_arguments": "integer", "arg_count": 1,
+         "returns": "integer", "language": "internal", "definition": None,
+         "comment": None}]}
+    out = schema_cmd.render_show(doc, "my_agg")
+    assert "definition:" not in out
+    assert out.startswith("function public.my_agg")
+
+
+def test_func_summary_is_compact_by_arg_count():
+    f = lambda n: {"name": "fn", "arg_count": n}
+    assert schema_cmd._func_summary(f(0)) == "fn()"
+    assert schema_cmd._func_summary(f(1)) == "fn(...)  # 1 arg"
+    assert schema_cmd._func_summary(f(3)) == "fn(...)  # 3 args"
+
+
+def test_render_schema_contents_lists_functions_compactly():
+    # billing's two `charge` overloads collapse to compact lines, not full args.
+    out = schema_cmd.render_schema_contents(BROWSE_DOC, "billing")
+    assert "functions (2):" in out
+    assert "charge(...)  # 1 arg" in out and "charge(...)  # 2 args" in out
+    # the noisy full argument list stays out of the list view
+    assert "amount numeric, currency text" not in out
 
 
 def test_render_show_ambiguous_bare_name_lists_candidates(capsys):
