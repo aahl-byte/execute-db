@@ -3,7 +3,8 @@ title: Schema Introspection
 summary: The `schema` command dumps a database's complete catalog as one JSON document, cached on disk as the exact bytes Postgres returned.
 intent: An external tool — an editor, a linter, a schema-browsing UI — needs the whole shape of a database to drive auto-complete, linting, option hints, and search. It should get that as one consistent snapshot it can load and re-index, without paying seconds of catalog querying on every refresh. This subsystem produces that document from a single read-only statement and caches it so that repeated calls are a byte copy rather than a round trip.
 parent: ARCHITECTURE.md
-children: []
+children:
+  - SCHEMA_BROWSE.md
 sources:
   - db_core/core/schema.py
   - db_core/commands/schema.py
@@ -16,22 +17,26 @@ tags: [schema, introspection, cache, postgres]
 
 `execute-db schema --dev` (or `explore-db schema --dev`, which is the better home
 for it) prints a complete, machine-readable description of a database as one JSON
-document: tables, partitioned tables, views, materialized views and foreign
-tables, each with columns, constraints, indexes, triggers and view definitions,
-plus enums, domains, functions, sequences, extensions and a `schema_version`.
-Expect megabytes — the development database this was built against produces about
-11.7 MB.
+document: every relation with its columns, constraints, indexes, triggers and
+(for views) definitions, plus enums, domains, functions with their `CREATE`
+bodies, sequences, extensions and a `schema_version`. Expect megabytes — the dev
+database this was built against produces about 14 MB.
 
-The layering is the house split: `db_core/core/schema.py` is pure logic that
-returns bytes and facts; `db_core/commands/schema.py` owns argparse, stderr
-chatter, and the disclosure decision; `db_core/cli.py` dispatches. Both
-front-ends inherit the command from the shared engine.
+This spec owns **producing and caching** that document. It has a second reader
+too: the `schema list`/`show`/`find` subcommands render the same cache as human
+text (`SCHEMA_BROWSE.md`). Bare `schema --dev` is the dump described here; the
+verbs are the browse surface.
 
-## Who this is for, and what follows from it
+The layering is the house split: `core/schema.py` is pure logic returning bytes
+and facts; `commands/schema.py` owns argparse, stderr chatter, and the disclosure
+decision; `cli.py` dispatches.
 
-The reader is a **program**, not a person. It loads the document once per refresh
-and re-indexes it into whatever structure it actually queries. Nearly every
-surface decision falls out of that one fact:
+## Who the dump is for, and what follows from it
+
+The reader of the **dump** is a program, not a person (the person's path is
+`SCHEMA_BROWSE.md`). It loads the document once per refresh and re-indexes it into
+whatever structure it actually queries. Nearly every surface decision on the dump
+falls out of that one fact:
 
 - **The whole document, always.** There is no `--table` or `--schema` projection.
   The consumer re-indexes regardless, so slicing here would only hand it a subset
@@ -45,7 +50,7 @@ surface decision falls out of that one fact:
 - **stdout carries the JSON and nothing else.** Cache status, warnings and errors
   go to stderr, so `schema --dev | jq` and `schema --dev > schema.json` both
   compose. `commands/schema.py` writes through `sys.stdout.buffer`, never
-  `print()` — an 11 MB `str` through the text layer costs a needless encode and
+  `print()` — a ~14 MB `str` through the text layer costs a needless encode and
   copy for nothing gained. The trailing newline is ours; `jsonb::text` emits
   none, and a redirected file that does not end in one is unfriendly. Every JSON
   parser ignores it.
@@ -63,16 +68,15 @@ it. Constraints therefore carry both the `pg_get_constraintdef` text *and*
 structured `columns`/`references` fields, so a consumer learns that this foreign
 key points at that table's those columns without parsing anything.
 
-Do not read the field list out of this spec; read it out of the SQL, which is the
-only authority on it. What is worth writing down is why the SQL is shaped the way
-it is.
+Read the field list out of the SQL, which is its only authority; what is worth
+writing down here is why the SQL is shaped the way it is.
 
 ### The `::text` cast is load-bearing
 
 The statement ends `)::text AS schema`. psycopg2 parses a `jsonb` result column
 into a Python **dict**; casting server-side hands back a **str** that
 `introspect` encodes straight to bytes. Without the cast the entire raw-bytes
-cache — the thing that makes an 11 MB document cheap — is silently defeated: the
+cache — the thing that makes a ~14 MB document cheap — is silently defeated: the
 document would be parsed on the way in and re-serialized on the way out. As a
 bonus, `jsonb::text` is already compact, which is exactly what we want.
 
@@ -94,9 +98,8 @@ The statement executes **with** a parameter (`schema_version`), and psycopg2
 in a `LIKE` pattern has to be written `%%` or `execute` raises at runtime. There
 are three today, all `pg\_...%%` patterns. Add a `LIKE` and you inherit the rule.
 
-This is fenced without a database by asserting that
-`INTROSPECT_SQL % {"schema_version": 1}` does not raise — precisely the
-formatting psycopg2 performs.
+It is fenced without a database by asserting `INTROSPECT_SQL % {"schema_version": 1}`
+does not raise — precisely the formatting psycopg2 performs.
 
 ### What the query excludes, and why
 
@@ -111,7 +114,7 @@ formatting psycopg2 performs.
   auto-complete.
 - **System namespaces**, `pg_toast%`, `pg_temp%`.
 
-Nulls are **kept**. `jsonb_strip_nulls` would save roughly 2 MB of 11.7, but it
+Nulls are **kept**. `jsonb_strip_nulls` would save a couple of MB, but it
 makes keys *vanish* rather than be present-and-null. The rigid, fully-populated
 shape is easier to write a strict typed loader against, and that is worth 2 MB to
 a consumer that reads this once per refresh. Likewise no `jsonb_pretty`: it was
@@ -124,8 +127,21 @@ just the first two. `(nspname, proname)` is **not** unique — overloads tie, an
 tie orders arbitrarily, so an unchanged schema could produce different bytes on
 every refresh. The tiebreak is drawn from the document's own visible content
 rather than an internal OID, and `(proname, proargtypes, pronamespace)` being
-uniquely indexed makes it total. If you add another aggregate, ask whether its
-sort key is unique before trusting it.
+uniquely indexed makes it total. If you add another aggregate, check its sort key
+is unique first.
+
+### Functions carry a count and a body
+
+Each function record carries `arg_count` (from `pg_proc.pronargs`) and
+`definition` (the full `CREATE` statement from `pg_get_functiondef`). Both exist
+for the browse child: `arg_count` lets `schema list` show a compact
+`name(...)  # N args`, and `definition` lets `schema show` print the body without
+a second connection (`SCHEMA_BROWSE.md`). `SCHEMA_VERSION` 2 added both, growing
+the document from ~11.7 MB to ~14 MB — ~2 MB of bodies across ~535 functions.
+
+`pg_get_functiondef` **raises** for aggregate and window functions, so its call
+is guarded `CASE WHEN p.prokind IN ('f', 'p') THEN ... END`; those carry a null
+`definition`. A single unguarded call would take the whole document down.
 
 ## Introspection is always read-only
 
@@ -159,9 +175,10 @@ cannot decide that about an exception the core has already caught.
 
 What lands on disk is the exact bytes Postgres returned. A hit is a byte copy to
 stdout: no `json.loads`, no re-serialize, no re-encode. That is the whole reason
-an 11.7 MB payload is a non-issue. Measured end to end through the real path
-(launcher → service user → psycopg2 → cache → stdout): **cold 3.5s, warm 0.193s,
-byte-identical by `cmp`.**
+a ~14 MB payload is a non-issue. Measured through the real launcher → service
+user → psycopg2 → cache → stdout path: **cold about 3.5s** (v2's function bodies
+cost negligibly — `pg_get_functiondef` is cheap), **warm around 0.2s** — a byte
+copy whose cost is near-constant in the document size, not scaling with it.
 
 ### Keyed by a hash of the URL
 
@@ -201,7 +218,9 @@ Bump `SCHEMA_VERSION` whenever the document's **shape** changes. Because it is
 part of the filename, a bump **misses** the old entry rather than serving a stale
 shape to a tool that cannot tell the difference. The version is also bound into
 the query as a parameter rather than baked into the SQL text, so the document
-always declares the version the code that produced it believes in.
+always declares the version the code that produced it believes in. This has
+happened once for real (the v2 function-body bump above): every pre-existing
+`.v1.json` was orphaned rather than misread as a v2 shape.
 
 ### Caching is an optimization; serving is the job
 
@@ -356,7 +375,7 @@ write is not.
 **The cache has no reaper.** `max_age` affects read freshness only; nothing ever
 unlinks an entry except `config rm` (which clears everything) and a
 `SCHEMA_VERSION` bump (which orphans rather than removes). Re-point an environment
-at a different database and the old entry is immortal — roughly 11.7 MB filed
+at a different database and the old entry is immortal — roughly 14 MB filed
 under a hash nothing will ever look up again. This is a **growth** problem, not a
 staleness one: correctness is safe, because an entry nobody looks up is never
 served. If it ever needs fixing, the fix is an age-based sweep, not a change to
@@ -369,9 +388,10 @@ against the SQL's *text* — and text assertions have already been fooled once (
 `::text` substring check above). It skips unless `EXECUTE_DB_TEST_URL` is set, and
 under a hardened install that URL is unreadable from a user account **by design**,
 so running it needs a plain install or a throwaway database. The SQL is not
-entirely unproven — it runs end to end through the real command against the dev
-database, which is where the 11.7 MB and 3.5s/0.193s numbers come from — but the
-shape assertions themselves have never executed.
+entirely unproven — it runs end to end against the dev database, which is where
+the ~14 MB and ~3.5s cold numbers come from — but the shape assertions
+themselves (including the new `arg_count`/`definition` checks) have never
+executed.
 
 **Not implemented, deliberately:** serving a stale cache when the database is
 unreachable. Useful for a UI, easy to add, but it means printing data while hiding
