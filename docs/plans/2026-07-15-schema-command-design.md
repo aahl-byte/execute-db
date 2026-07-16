@@ -33,6 +33,10 @@ Payload size by variant:
 | compact, stripped, no view definitions | 3.8 MB |
 | light index (names/types/keys only) | 2.5 MB |
 
+> **Reconciliation (added after implementation).** These variants were measured with a probe query that built only `tables` and `enums`, so they omit domains, functions, sequences, and extensions. The **shipped** command produces **11.7 MB** on the same database — that is the number the README quotes, and the honest one. The table remains useful for the *relative* cost of each decision (pretty-printing is ~39%, view definitions ~5 MB), which is what it was built to settle.
+>
+> Likewise "35 schemas" here counts namespaces that *contain relations*; the document's `schemas` key counts all non-system namespaces, hence 36. Both are correct; they answer different questions.
+
 ---
 
 ## Locked design decisions
