@@ -102,9 +102,9 @@ def build_browse_parser(action: str, envs: list) -> argparse.ArgumentParser:
     if action in ("list", "ls"):
         parser.description = (
             "List the schemas in a database, or the objects in one schema.\n\n"
-            "With no name: every schema, with how many tables, views, and\n"
-            "functions each holds. With a schema name: the tables, views,\n"
-            "functions, and enums inside it."
+            "With no name: every schema, with how many tables, views, functions,\n"
+            "and procedures each holds. With a schema name: the tables, views,\n"
+            "functions, procedures, and enums inside it."
         )
         parser.epilog = ("examples:\n"
                          f"  {name} schema list --dev            # all schemas + counts\n"
@@ -246,19 +246,32 @@ def _column_flags(col: dict) -> str:
     return "  ".join(parts)
 
 
+# How each routine kind (pg_proc.prokind, mapped by the introspection query) is
+# labelled and ordered where routines are grouped. A kind not named here still
+# gets a group under its own value rather than vanishing.
+_ROUTINE_LABELS = {"function": "functions", "procedure": "procedures",
+                   "aggregate": "aggregates", "window": "window functions"}
+
+
 def render_schema_list(doc: dict) -> str:
-    """Every schema, with a count of the tables, views, and functions it holds."""
-    counts = {name: {"table": 0, "view": 0, "func": 0} for name in doc["schemas"]}
+    """Every schema, with counts of the tables, views, functions, and procedures it holds."""
+    def blank():
+        return {"table": 0, "view": 0, "func": 0, "proc": 0}
+    counts = {name: blank() for name in doc["schemas"]}
     for t in doc["tables"]:
-        bucket = counts.setdefault(t["schema"], {"table": 0, "view": 0, "func": 0})
+        bucket = counts.setdefault(t["schema"], blank())
         bucket["view" if t["kind"] in ("view", "materialized_view") else "table"] += 1
     for f in doc["functions"]:
-        counts.setdefault(f["schema"], {"table": 0, "view": 0, "func": 0})["func"] += 1
+        # A procedure is its own count, not a function; every other routine kind
+        # (aggregate, window) tallies under functions so nothing goes uncounted.
+        counts.setdefault(f["schema"], blank())["proc" if f["kind"] == "procedure"
+                                                 else "func"] += 1
 
-    rows = [("SCHEMA", "TABLES", "VIEWS", "FUNCTIONS")]
+    rows = [("SCHEMA", "TABLES", "VIEWS", "FUNCTIONS", "PROCEDURES")]
     for name in sorted(counts):
         c = counts[name]
-        rows.append((name, str(c["table"]), str(c["view"]), str(c["func"])))
+        rows.append((name, str(c["table"]), str(c["view"]),
+                     str(c["func"]), str(c["proc"])))
     header = f"{len(doc['schemas'])} schemas in {doc['database']}"
     return header + "\n" + "\n".join(_aligned(rows))
 
@@ -273,23 +286,32 @@ def render_schema_contents(doc: dict, schema_name: str) -> str:
     rels = [t for t in doc["tables"] if t["schema"] == schema_name]
     tables = sorted(t["name"] for t in rels if t["kind"] not in ("view", "materialized_view"))
     views = sorted(t["name"] for t in rels if t["kind"] in ("view", "materialized_view"))
-    # Compact here on purpose: a full argument list per function runs off the
+    # Compact here on purpose: a full argument list per routine runs off the
     # screen (see the customer schema), and the point of `list` is to scan. The
     # real signature and body are one `show` away. Sorted by identity arguments
     # so overloads keep a stable order even though the display collapses them.
-    fns = sorted((f for f in doc["functions"] if f["schema"] == schema_name),
-                 key=lambda f: (f["name"], f["identity_arguments"]))
-    funcs = [_func_summary(f) for f in fns]
+    routines = sorted((f for f in doc["functions"] if f["schema"] == schema_name),
+                      key=lambda f: (f["name"], f["identity_arguments"]))
+    # Split by kind so procedures read as procedures, not as functions you cannot
+    # tell apart. Named kinds go first, in _ROUTINE_LABELS order; any unnamed
+    # kind still gets a group under its own value rather than being dropped.
+    by_kind = {}
+    for f in routines:
+        by_kind.setdefault(f["kind"], []).append(_func_summary(f))
+    routine_sections = [(label, by_kind.pop(kind))
+                        for kind, label in _ROUTINE_LABELS.items() if by_kind.get(kind)]
+    routine_sections += [(str(kind or "routines"), items) for kind, items in by_kind.items()]
+
     enums = sorted(f"{e['name']} {{{', '.join(e['values'])}}}"
                    for e in doc["enums"] if e["schema"] == schema_name)
 
+    sections = [("tables", tables), ("views", views), *routine_sections, ("enums", enums)]
     out = [f"schema {schema_name} in {doc['database']}"]
-    for label, items in (("tables", tables), ("views", views),
-                         ("functions", funcs), ("enums", enums)):
+    for label, items in sections:
         if items:
             out.append(f"\n{label} ({len(items)}):")
             out += [f"  {i}" for i in items]
-    if not (tables or views or funcs or enums):
+    if not any(items for _, items in sections):
         out.append("  (empty)")
     return "\n".join(out)
 

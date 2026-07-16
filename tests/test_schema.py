@@ -914,6 +914,11 @@ BROWSE_DOC = {
          "returns": "boolean", "language": "plpgsql",
          "definition": "CREATE FUNCTION billing.charge(numeric, text) ...",
          "comment": None},
+        {"schema": "billing", "name": "reconcile", "kind": "procedure",
+         "arguments": "IN p_day date", "identity_arguments": "date", "arg_count": 1,
+         "returns": "", "language": "plpgsql",
+         "definition": "CREATE PROCEDURE billing.reconcile(date) ...",
+         "comment": None},
     ],
     "domains": [], "sequences": [], "extensions": [],
 }
@@ -922,10 +927,11 @@ BROWSE_DOC = {
 def test_render_schema_list_counts_by_kind():
     out = schema_cmd.render_schema_list(BROWSE_DOC)
     assert "2 schemas in shop" in out
-    # public: 2 tables (users, orgs), 1 view, 0 functions
-    assert re.search(r"public\s+2\s+1\s+0", out)
-    # billing: 1 table, 0 views, 2 functions (the two overloads)
-    assert re.search(r"billing\s+1\s+0\s+2", out)
+    assert "PROCEDURES" in out
+    # public: 2 tables (users, orgs), 1 view, 0 functions, 0 procedures
+    assert re.search(r"public\s+2\s+1\s+0\s+0", out)
+    # billing: 1 table, 0 views, 2 functions (charge overloads), 1 procedure
+    assert re.search(r"billing\s+1\s+0\s+2\s+1", out)
 
 
 def test_render_schema_contents_groups_objects():
@@ -1011,6 +1017,15 @@ def test_render_schema_contents_lists_functions_compactly():
     assert "charge(1 arg)" in out and "charge(2 args)" in out
     # the noisy full argument list stays out of the list view
     assert "amount numeric, currency text" not in out
+
+
+def test_render_schema_contents_separates_procedures_from_functions():
+    out = schema_cmd.render_schema_contents(BROWSE_DOC, "billing")
+    assert "functions (2):" in out and "procedures (1):" in out
+    assert "reconcile(1 arg)" in out
+    # the procedure is under its own group, not counted among the functions
+    funcs_block = out.split("functions (2):")[1].split("procedures")[0]
+    assert "reconcile" not in funcs_block
 
 
 def test_render_show_ambiguous_bare_name_lists_candidates(capsys):

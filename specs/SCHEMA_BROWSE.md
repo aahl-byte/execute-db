@@ -26,8 +26,8 @@ document (`SCHEMA_INTROSPECTION.md`) into something a person reads. They are the
 human counterpart to the bare `schema` **dump**, which targets a program.
 
 ```
-schema list --dev                 every schema, with table/view/function counts
-schema list public --dev          the tables, views, functions, enums in one schema
+schema list --dev                 every schema, with table/view/function/procedure counts
+schema list public --dev          the tables, views, functions, procedures, enums in one schema
 schema show public.users --dev    one object in full
 schema find email --dev           substring search across every name
 ```
@@ -71,10 +71,15 @@ consequences worth holding onto:
 The guiding rule is *compact in the overview, complete on drill-in*. It shows up
 most in functions, which is why the document carries the fields it does.
 
-- `schema list <schema>` renders each function as `name(3 args)` (or `name()`
+- `schema list <schema>` renders each routine as `name(3 args)` (or `name()`
   for none) via `_func_summary`. The full argument list is deliberately withheld
   here: a 9-argument signature runs off the screen, and the point of `list` is to
-  scan.
+  scan. **Procedures are split into their own group**, not lumped under
+  functions — they are a distinct `prokind`, and the introspection document keeps
+  them all in one `functions` array, so the split is the display's job
+  (`_ROUTINE_LABELS` names each kind; an unnamed kind still gets its own group
+  rather than vanishing). The overview counts them in a separate `PROCEDURES`
+  column for the same reason.
 - `schema show <function>` prints the real signature(s), the return type,
   language, comment, **and the whole `CREATE` body**.
 
