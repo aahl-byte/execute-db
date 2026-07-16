@@ -857,3 +857,193 @@ def test_system_mode_discloses_a_server_error_masked_by_a_failed_rollback(
         "Schema introspection failed: terminating connection due to "
         "administrator command\n"
     )
+
+
+# --- browse subcommands: list / show / find ------------------------------------
+
+def _rel(schema_, name, kind="table", columns=(), constraints=(), indexes=(),
+         triggers=(), comment=None, view_definition=None):
+    return {"schema": schema_, "name": name, "kind": kind, "comment": comment,
+            "columns": list(columns), "constraints": list(constraints),
+            "indexes": list(indexes), "triggers": list(triggers),
+            "view_definition": view_definition}
+
+
+def _col(name, type_="text", not_null=False, default=None, comment=None,
+         identity=None, generated=None):
+    return {"name": name, "type": type_, "not_null": not_null, "default": default,
+            "identity": identity, "generated": generated, "comment": comment}
+
+
+BROWSE_DOC = {
+    "database": "shop",
+    "schemas": ["public", "billing"],
+    "tables": [
+        _rel("public", "users", comment="app accounts",
+             columns=[_col("id", "integer", not_null=True, default="nextval('s')"),
+                      _col("email", "text", not_null=True, comment="login"),
+                      _col("org_id", "integer")],
+             constraints=[
+                 {"name": "users_pkey", "type": "primary_key", "columns": ["id"],
+                  "definition": "PRIMARY KEY (id)", "references": None},
+                 {"name": "users_org_fk", "type": "foreign_key", "columns": ["org_id"],
+                  "definition": "FOREIGN KEY (org_id) REFERENCES public.orgs(id)",
+                  "references": {"table": "public.orgs", "columns": ["id"]}},
+             ],
+             indexes=[{"name": "users_pkey", "definition": "CREATE UNIQUE INDEX ...",
+                       "unique": True, "primary": True}],
+             triggers=[{"name": "users_audit", "definition": "AFTER INSERT ..."}]),
+        _rel("public", "orgs", columns=[_col("id", "integer", not_null=True)]),
+        _rel("public", "user_view", kind="view",
+             columns=[_col("id", "integer")], view_definition="SELECT id FROM users"),
+        _rel("billing", "invoices", columns=[_col("id", "integer")]),
+    ],
+    "enums": [
+        {"schema": "public", "name": "user_status",
+         "values": ["active", "suspended"], "comment": None},
+    ],
+    "functions": [
+        {"schema": "billing", "name": "charge", "kind": "function",
+         "arguments": "amount numeric", "identity_arguments": "numeric",
+         "returns": "boolean", "language": "plpgsql", "comment": "bill a card"},
+        {"schema": "billing", "name": "charge", "kind": "function",
+         "arguments": "amount numeric, currency text",
+         "identity_arguments": "numeric, text",
+         "returns": "boolean", "language": "plpgsql", "comment": None},
+    ],
+    "domains": [], "sequences": [], "extensions": [],
+}
+
+
+def test_render_schema_list_counts_by_kind():
+    out = schema_cmd.render_schema_list(BROWSE_DOC)
+    assert "2 schemas in shop" in out
+    # public: 2 tables (users, orgs), 1 view, 0 functions
+    assert re.search(r"public\s+2\s+1\s+0", out)
+    # billing: 1 table, 0 views, 2 functions (the two overloads)
+    assert re.search(r"billing\s+1\s+0\s+2", out)
+
+
+def test_render_schema_contents_groups_objects():
+    out = schema_cmd.render_schema_contents(BROWSE_DOC, "public")
+    assert "tables (2):" in out and "views (1):" in out and "enums (1):" in out
+    assert "user_status {active, suspended}" in out
+    # a view is not counted among tables
+    assert "user_view" in out.split("views")[1]
+
+
+def test_render_schema_contents_rejects_unknown_schema_with_a_hint(capsys):
+    with pytest.raises(SystemExit):
+        schema_cmd.render_schema_contents(BROWSE_DOC, "publi")
+    err = capsys.readouterr().err
+    assert "No schema named 'publi'" in err and "Did you mean: public" in err
+
+
+def test_render_show_relation_has_every_section():
+    out = schema_cmd.render_show(BROWSE_DOC, "public.users")
+    assert out.startswith("table public.users")
+    assert "-- app accounts" in out          # table comment
+    for section in ("columns (3):", "constraints (2):", "indexes (1):", "triggers (1):"):
+        assert section in out
+    assert "-- login" in out                 # column comment, re-attached after alignment
+    assert "not null" in out and "default nextval('s')" in out
+    assert "REFERENCES public.orgs(id)" in out
+
+
+def test_render_show_resolves_a_bare_name_uniquely():
+    # 'users' exists only in public, so a bare name is enough.
+    assert schema_cmd.render_show(BROWSE_DOC, "users").startswith("table public.users")
+
+
+def test_render_show_enum_lists_values():
+    out = schema_cmd.render_show(BROWSE_DOC, "user_status")
+    assert out.startswith("enum public.user_status")
+    assert "active" in out and "suspended" in out
+
+
+def test_render_show_function_lists_overloads():
+    out = schema_cmd.render_show(BROWSE_DOC, "billing.charge")
+    assert "2 overloads" in out
+    assert "amount numeric, currency text" in out
+    assert "returns boolean" in out
+
+
+def test_render_show_ambiguous_bare_name_lists_candidates(capsys):
+    doc = {**BROWSE_DOC, "tables": BROWSE_DOC["tables"] + [_rel("billing", "users")]}
+    with pytest.raises(SystemExit):
+        schema_cmd.render_show(doc, "users")
+    err = capsys.readouterr().err
+    assert "billing.users" in err and "public.users" in err
+
+
+def test_render_show_unknown_object_fails():
+    with pytest.raises(SystemExit):
+        schema_cmd.render_show(BROWSE_DOC, "public.nope")
+
+
+def test_render_find_is_case_insensitive_and_grouped():
+    out = schema_cmd.render_find(BROWSE_DOC, "USER")
+    assert "tables/views (2):" in out          # users and user_view
+    assert "enums (1):" in out                 # user_status
+    assert "public.user_view" in out and "public.users" in out
+
+
+def test_render_find_matches_enum_values():
+    out = schema_cmd.render_find(BROWSE_DOC, "suspended")
+    assert "enum values (1):" in out
+    assert "public.user_status -> suspended" in out
+
+
+def test_render_find_reports_nothing_when_empty():
+    assert "No schema, table, column" in schema_cmd.render_find(BROWSE_DOC, "zzznope")
+
+
+def test_render_find_caps_each_category_and_says_so():
+    cols = [_col(f"c{i}") for i in range(schema_cmd.FIND_CAP + 5)]
+    doc = {**BROWSE_DOC, "tables": [_rel("public", "wide", columns=cols)],
+           "enums": [], "functions": [], "schemas": ["public"]}
+    out = schema_cmd.render_find(doc, "c")
+    assert f"and 5 more" in out
+
+
+# --- browse dispatch: the verb routes, and bare --dev still dumps ---------------
+
+@pytest.fixture
+def browse_load(monkeypatch):
+    calls = []
+
+    def _load(url, max_age=schema.DEFAULT_MAX_AGE_SECONDS, refresh=False):
+        calls.append({"url": url, "max_age": max_age, "refresh": refresh})
+        return schema.SchemaResult(document=json.dumps(BROWSE_DOC).encode(),
+                                   cached=False, elapsed=0.1, cache_written=True)
+
+    monkeypatch.setattr(schema, "load", _load)
+    return calls
+
+
+def test_list_verb_routes_to_the_browser(dev_env, browse_load, capsys):
+    schema_cmd.run(["list", "--dev"])
+    assert "schemas in shop" in capsys.readouterr().out
+
+
+def test_show_verb_routes_to_the_browser(dev_env, browse_load, capsys):
+    schema_cmd.run(["show", "public.users", "--dev"])
+    assert capsys.readouterr().out.startswith("table public.users")
+
+
+def test_find_verb_routes_to_the_browser(dev_env, browse_load, capsys):
+    schema_cmd.run(["find", "email", "--dev"])
+    assert "public.users.email" in capsys.readouterr().out
+
+
+def test_bare_dev_still_dumps_json_not_browse(dev_env, browse_load, capsysbinary):
+    schema_cmd.run(["--dev"])
+    out = capsysbinary.readouterr()[0]
+    assert json.loads(out)["database"] == "shop"   # raw JSON, not the text renderer
+
+
+def test_browse_flags_reach_the_engine(dev_env, browse_load):
+    schema_cmd.run(["list", "--dev", "--refresh"])
+    schema_cmd.run(["show", "users", "--dev", "--max-age", "30m"])
+    assert browse_load[0]["refresh"] is True
+    assert browse_load[1]["max_age"] == 1800

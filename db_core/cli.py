@@ -42,10 +42,12 @@ Output formats (-o/--format, default: table):
   csv       header + rows          list   tab-separated, no header (for cut/awk)
   Only result rows go to stdout; row counts and --meta summaries go to stderr.
 
-Dump the schema as JSON (for editors, linters, and other tools):
-  {name} schema --dev              tables, columns, keys, indexes, enums, ...
-  {name} schema --dev --refresh    re-read it now (e.g. after a migration)
-  Cached for {schema_max_age} by default; only the JSON goes to stdout.
+Inspect the schema (cached for {schema_max_age}; --refresh to re-read after a migration):
+  {name} schema --dev              dump the whole schema as JSON (for tools)
+  {name} schema list --dev         browse: schemas, with table/view/function counts
+  {name} schema list public --dev  browse: the tables, views, and functions in a schema
+  {name} schema show public.users --dev   browse: one table/view/enum/function in full
+  {name} schema find email --dev   browse: search names across the whole database
 
 Manage environments (each is a .env.<name> file in ~/{config_dirname}):
   {name} config list               list environments and whether each is encrypted
