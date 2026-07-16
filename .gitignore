@@ -4,3 +4,7 @@ __pycache__
 __pycache/**/*
 **/pycache
 TODO.yaml
+
+# setuptools staging dir: a stale duplicate of the source tree, and the
+# reason `git status` used to show phantom edits under build/lib.
+build/
