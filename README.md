@@ -11,6 +11,7 @@ Connection credentials can optionally be **password-encrypted at rest**: an encr
 - [explore-db (read-only sibling)](#explore-db-read-only-sibling) 
 - [Setup](#setup) 
 - [Usage](#usage) 
+- [Schema introspection](#schema-introspection) 
 - [Password protection](#password-protection) 
 - [Ephemeral tokens](#ephemeral-tokens) 
 - [Hardened install](#hardened-install-privilege-separation) 
@@ -50,7 +51,7 @@ Installing this package provides **two** console scripts from one shared engine:
 | `execute-db` | read/write (commit on success) | `~/.execute-db/` |
 | `explore-db` | **read-only** (server rejects writes) | `~/.explore-db/` |
 
-`explore-db` is byte-for-byte the same tool as `execute-db` — same commands (`config`, `password`, `token`), same flags, same output formats — with exactly two differences: every query runs in a `default_transaction_read_only=on` transaction (so `INSERT`/`UPDATE`/`DELETE`/DDL fail at the server, not by SQL parsing), and it keeps its **own** environment store in `~/.explore-db/`. The separate store is deliberate: it means `execute-db` can never reach a passwordless environment you created only for read-only exploration.
+`explore-db` is byte-for-byte the same tool as `execute-db` — same commands (`config`, `password`, `token`, `schema`), same flags, same output formats — with exactly two differences: every query runs in a `default_transaction_read_only=on` transaction (so `INSERT`/`UPDATE`/`DELETE`/DDL fail at the server, not by SQL parsing), and it keeps its **own** environment store in `~/.explore-db/`. The separate store is deliberate: it means `execute-db` can never reach a passwordless environment you created only for read-only exploration.
 
 ```bash
 explore-db config set analytics   # prompts for URL + optional password
@@ -89,7 +90,7 @@ execute-db config set <name>    # create/replace: prompts for URL + optional pas
 execute-db config rm <name>     # remove it and revoke outstanding tokens
 ```
 
-`config set` doubles as create, edit-URL, and password reset: it always re-prompts for the URL and an optional new password and writes a fresh file, so forgetting a password just means running it again (leave the password blank to drop encryption). `config rm` securely wipes the file and revokes **all** outstanding tokens (token files carry no environment identity, so a per-environment revoke isn't possible) — to fully cut off a removed environment, rotate its database password server-side.
+`config set` doubles as create, edit-URL, and password reset: it always re-prompts for the URL and an optional new password and writes a fresh file, so forgetting a password just means running it again (leave the password blank to drop encryption). `config rm` securely wipes the file, revokes **all** outstanding tokens (token files carry no environment identity, so a per-environment revoke isn't possible), and clears **all** [cached schema documents](#the-cache) (same reason) — to fully cut off a removed environment, rotate its database password server-side.
 
 ### Dynamic environments
 
@@ -145,6 +146,46 @@ Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print their outcome t
 ```
 Rows affected: 1
 ```
+
+## Schema introspection
+
+`schema` prints a complete, machine-readable description of an environment's schema as one JSON document:
+
+```bash
+execute-db schema --dev > schema.json
+execute-db schema --dev --refresh          # re-read it now — e.g. after a migration
+execute-db schema --token <TOKEN> --meta   # unattended, with cache status on stderr
+```
+
+The document covers tables, partitioned tables, views, materialized views, and foreign tables — each with its columns (type, nullability, default, identity/generated, ordinal position, comment), constraints, indexes, triggers, and, for the two view kinds, the view definition — plus enums with their values, domains, functions with their signatures, sequences, installed extensions, and a `schema_version`. Constraints carry both the `pg_get_constraintdef` text *and* structured `columns`/`references` fields, so a consumer learns that this foreign key points at *that* table's *those* columns without parsing DDL back out of a string. It is all produced by a single catalog query, so what lands on stdout is a consistent snapshot rather than a set of moments that disagree.
+
+**It is written for a program, not for you.** The intended reader is an external tool — an editor, a linter, a schema-browsing UI — that loads the document once per refresh and re-indexes it into its own structure for auto-complete, linting, option hints, and search. That's why the whole document is always served: there is no `--table`/`--schema` projection, because the consumer re-indexes anyway and slicing here would only hand it a subset to work around; and there is no `-o` format, because every renderer [above](#output-formats) is row-shaped and none of them fits a nested document. Only the JSON goes to stdout, never paged, so it pipes straight into a parser or redirects into a file. Expect megabytes — the development database this was built against (2,127 relations, 31,612 columns, 36 schemas) produces 11.7 MB.
+
+Introspection **always runs in a read-only transaction**, even under `execute-db`: it has no reason to ever write, so it is structurally incapable of it rather than trusting a flag. It also adds no new reach — anyone who can run `execute-db --dev "SELECT ..."` can already read `pg_catalog` and `information_schema` for themselves. This is a convenience wrapper over statements the caller is already authorized to run.
+
+### The cache
+
+A schema only moves when someone migrates it, and re-introspecting costs seconds, so the result is cached. On the database above a cold run takes about 3s and a cache hit about 0.01s: what's cached is the exact bytes Postgres returned, so a hit is a copy to stdout with no parse and no re-serialize on the way through.
+
+By default a cached copy is served when it is younger than **15 minutes**; `--max-age` moves that bound, and `--refresh` ignores the cache outright:
+
+```bash
+execute-db schema --dev                 # serve the cached copy if it's younger than 15m
+execute-db schema --dev --max-age 2h    # accept an older one (45s/30m/2h/1d)
+execute-db schema --dev --max-age 0     # don't read the cache — but still update it
+execute-db schema --dev --refresh       # the same thing, spelled plainly
+execute-db schema --dev --meta          # cache status on stderr, stdout still just JSON
+```
+
+`--meta` prints `cached (age 3m)` or `refreshed in 3.2s` to **stderr**, following the same rule as the rest of the tool: stdout carries data only, so `schema --meta | jq` composes.
+
+Entries live in `<config dir>/cache/`, one file per database, named for a **hash of the connection URL** rather than for the environment. An environment and a token that point at the same database therefore share one entry, and the URL itself never touches the disk — only its digest. The file's mtime *is* the fetch time, so there is no sidecar to keep in sync with it, and the schema version is part of the filename, so bumping it misses the old entry instead of serving a stale shape to a tool that can't tell the difference. A corrupt, truncated, or unreadable entry is a miss rather than an error — it costs one re-introspection. If the cache can't be *written*, the document still goes to stdout with a warning on stderr: caching is an optimization, serving the schema is the job.
+
+That URL-hash keying is also why [`config rm`](#managing-environments) clears the **whole** cache rather than one entry: entries carry no environment identity, so `rm` can't pick out "its" one without decrypting the environment first — and a cache this cheap to rebuild isn't worth doing that for.
+
+The cache is plaintext, at mode `0600` in a `0700` directory, because a schema is not a credential. In the plain install that does mean a process running as you can read your table and column names out of it, even for an environment whose `.env` file is encrypted. The [hardened install](#hardened-install-privilege-separation) puts the cache in the service user's home, where your own account can't read it either — there, as everywhere, stdout is the interface, not the file.
+
+Examples here use `execute-db` for consistency with the rest of this README, but [`explore-db`](#explore-db-read-only-sibling) is the better home for this: introspection is read-only either way, and a tool you point at a schema rarely has any business holding write access. `explore-db schema --analytics` is the same command over the same engine, against explore-db's own store.
 
 ## Password protection
 
