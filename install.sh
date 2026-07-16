@@ -237,7 +237,19 @@ UNIT
 # ---------------------------------------------------------------------------
 do_uninstall() {
     local uhome="" name svc home store launcher sudoers sweep_svc sweep_tmr restore
-    [ -n "$TARGET_USER" ] && uhome="$(user_home "$TARGET_USER")"
+    # Refuse before touching anything, the same way install pre-flights the store.
+    # The restore below is gated on TARGET_USER; `rm -rf "$home"` a few lines later
+    # is NOT. From a root shell (no SUDO_USER) that combination deletes every
+    # credential store with nothing copied back and no warning -- and the closing
+    # line quietly drops its "Restored stores..." clause, so it reads like success.
+    if [ -z "$TARGET_USER" ]; then
+        die "cannot tell whose stores to restore: no --user given and \$SUDO_USER is unset.
+  Re-run as 'sudo ./install.sh --uninstall' from your own account, or pass
+  '--user <name>' explicitly. Refusing rather than deleting ${APPS// /, } stores
+  with nowhere to put them back."
+    fi
+    uhome="$(user_home "$TARGET_USER")"
+    [ -n "$uhome" ] || die "no home directory for user '${TARGET_USER}'"
 
     for name in $APPS; do
         svc="$(app_user "$name")"
