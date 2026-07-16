@@ -537,22 +537,22 @@ def test_parse_max_age_ignores_the_hardened_ttl_cap(monkeypatch):
     assert schema_cmd.parse_max_age("48h") == 172800
 
 
-# --- _age_text ---------------------------------------------------------------
+# --- age_text ---------------------------------------------------------------
 
 def test_age_text_reads_in_the_units_max_age_is_spelled_in():
-    assert schema_cmd._age_text(0) == "0s"
-    assert schema_cmd._age_text(45.7) == "45s"
-    assert schema_cmd._age_text(60) == "1m"
-    assert schema_cmd._age_text(3599) == "59m"
-    assert schema_cmd._age_text(7200) == "2h"
-    assert schema_cmd._age_text(90000) == "1d"
+    assert schema_cmd.age_text(0) == "0s"
+    assert schema_cmd.age_text(45.7) == "45s"
+    assert schema_cmd.age_text(60) == "1m"
+    assert schema_cmd.age_text(3599) == "59m"
+    assert schema_cmd.age_text(7200) == "2h"
+    assert schema_cmd.age_text(90000) == "1d"
 
 
 def test_age_text_says_unknown_rather_than_formatting_a_none():
     # age is best-effort even on a hit: load re-stats the file, and an entry
     # cleared in between leaves the age unknown while the document it already
     # read is still perfectly good (see core.schema.load). int(None) is a crash.
-    assert schema_cmd._age_text(None) == "unknown"
+    assert schema_cmd.age_text(None) == "unknown"
 
 
 # --- the command -------------------------------------------------------------

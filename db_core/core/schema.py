@@ -30,7 +30,7 @@ from . import store
 # cannot tell the difference.
 SCHEMA_VERSION = 2  # v2: functions carry arg_count + definition (the CREATE body)
 
-DEFAULT_MAX_AGE_SECONDS = 15 * 60  # default --max-age; a schema only moves on migration
+DEFAULT_MAX_AGE_SECONDS = 4 * 3600  # default --max-age; a schema only moves on migration
 
 
 @dataclass

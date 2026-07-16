@@ -167,11 +167,11 @@ Introspection **always runs in a read-only transaction**, even under `execute-db
 
 A schema only moves when someone migrates it, and re-introspecting costs seconds, so the result is cached. On the database above a cold run takes about 3s and a cache hit about 0.2s: what's cached is the exact bytes Postgres returned, so a hit is a copy to stdout with no parse and no re-serialize on the way through.
 
-By default a cached copy is served when it is younger than **15 minutes**; `--max-age` moves that bound, and `--refresh` ignores the cache outright:
+By default a cached copy is served when it is younger than **4 hours**; `--max-age` moves that bound, and `--refresh` ignores the cache outright:
 
 ```bash
-execute-db schema --dev                 # serve the cached copy if it's younger than 15m
-execute-db schema --dev --max-age 2h    # accept an older one (45s/30m/2h/1d)
+execute-db schema --dev                 # serve the cached copy if it's younger than 4h
+execute-db schema --dev --max-age 1d    # accept an older one (45s/30m/2h/1d)
 execute-db schema --dev --max-age 0     # don't read the cache — but still update it
 execute-db schema --dev --refresh       # the same thing, spelled plainly
 execute-db schema --dev --meta          # cache status on stderr, stdout still just JSON

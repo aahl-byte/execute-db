@@ -53,7 +53,7 @@ def _add_source_flags(parser: argparse.ArgumentParser, envs: list):
     parser.add_argument("--max-age", metavar="AGE", default=None,
                         help="serve a cached copy only if younger than AGE "
                              "(45s/30m/2h/1d; default "
-                             f"{schema.DEFAULT_MAX_AGE_SECONDS // 60}m, 0 to bypass)")
+                             f"{age_text(schema.DEFAULT_MAX_AGE_SECONDS)}, 0 to bypass)")
 
 
 def build_parser(envs: list) -> argparse.ArgumentParser:
@@ -161,8 +161,12 @@ def parse_max_age(text: "str | None") -> float:
     return tokens.parse_duration(text, "--max-age")
 
 
-def _age_text(seconds: "float | None") -> str:
-    """A coarse age for --meta, in the units --max-age is spelled in.
+def age_text(seconds: "float | None") -> str:
+    """A coarse age, in the units --max-age is spelled in.
+
+    Used for --meta's cache age and to spell the default in help text -- the
+    latter is why this is public: `cli.py` renders the same default in the
+    overview, and dividing by 60 there would print a 4h default as "240m".
 
     None is a real answer, not a gap: `load` re-stats the file to age a cache
     hit, and an entry cleared in between leaves the age unknown while the
@@ -480,7 +484,7 @@ def _run_dump(argv: list, envs: list):
         print("Warning: the schema could not be cached; the next call will "
               "introspect again.", file=sys.stderr)
     if args.meta:
-        print(f"cached (age {_age_text(result.age)})" if result.cached
+        print(f"cached (age {age_text(result.age)})" if result.cached
               else f"refreshed in {result.elapsed:.1f}s", file=sys.stderr)
 
 

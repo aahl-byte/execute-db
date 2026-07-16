@@ -84,7 +84,9 @@ def _help_fields() -> dict:
         "txn_note": txn_note,
         # Interpolated, not retyped: `{name} schema --help` reads the same
         # constant, and two copies of a default only stay equal until one moves.
-        "schema_max_age": f"{schema_core.DEFAULT_MAX_AGE_SECONDS // 60}m",
+        # Shared formatter too, so both spell it the same way -- dividing by 60
+        # here would render a 4h default as "240m".
+        "schema_max_age": schema_cmd.age_text(schema_core.DEFAULT_MAX_AGE_SECONDS),
     }
 
 
