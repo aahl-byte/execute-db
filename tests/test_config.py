@@ -4,7 +4,9 @@ from db_core import console
 from db_core.commands import config
 from db_core.commands import exec as exec_cmd
 from db_core.core import crypto, keyring, schema
+from db_core.commands import token as token_cmd
 from db_core.core import store as store_mod
+from db_core.core import tokens
 from db_core.core import system
 
 
@@ -213,3 +215,34 @@ def test_exec_empty_store_guides_user(store, capsys):
         exec_cmd.run(["--dev", "SELECT 1"])
     err = capsys.readouterr().err
     assert "config set" in err
+
+
+# --- token create: what it claims about auto-wipe ------------------------------
+
+def _token_result(scheduled):
+    return tokens.TokenResult(token="t", tid="a" * 12, env="dev", expiry=0,
+                              ttl="2h", bound=True, scheduled=scheduled)
+
+
+def test_token_create_does_not_cry_wolf_in_system_mode(monkeypatch, capsys):
+    # schedule_token_wipe returns False in system mode BY DESIGN -- there is no
+    # user bus to schedule against -- and install.sh lays down a system timer
+    # sweeping every minute instead. Warning here would alarm the caller about
+    # the configuration with the best wipe coverage we ship.
+    monkeypatch.setattr(token_cmd.tokens, "create_token",
+                        lambda env, ttl: _token_result(scheduled=False))
+    monkeypatch.setattr(token_cmd, "in_system_mode", lambda: True)
+    token_cmd.cmd_create("dev", "2h")
+    out, err = capsys.readouterr()
+    assert "sweeps every minute" in out
+    assert "could not schedule" not in err
+
+
+def test_token_create_still_warns_when_a_user_timer_really_failed(monkeypatch, capsys):
+    # Outside system mode a False genuinely means the attempt failed, and the
+    # caller needs to know the file outlives its expiry.
+    monkeypatch.setattr(token_cmd.tokens, "create_token",
+                        lambda env, ttl: _token_result(scheduled=False))
+    monkeypatch.setattr(token_cmd, "in_system_mode", lambda: False)
+    token_cmd.cmd_create("dev", "2h")
+    assert "could not schedule" in capsys.readouterr().err

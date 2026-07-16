@@ -13,6 +13,7 @@ from .. import app
 from ..console import fail
 from ..core import crypto, tokens
 from ..core.store import discover_envs
+from ..core.system import in_system_mode
 
 
 def cmd_create(env: str, ttl: str):
@@ -30,6 +31,13 @@ def cmd_create(env: str, ttl: str):
               file=sys.stderr)
     if res.scheduled:
         print("  auto-wipe: systemd user timer scheduled at expiry")
+    elif in_system_mode():
+        # False here is by design, not by failure: system mode has no user bus,
+        # so core.tokens never attempts a transient timer (see its comment). The
+        # installed system timer sweeps every minute instead -- better coverage
+        # than a per-token timer, so warning here would alarm the caller about
+        # the strongest configuration we ship.
+        print("  auto-wipe: the installed system timer sweeps every minute")
     else:
         print("  auto-wipe: could not schedule a systemd user timer — the file "
               f"will only be wiped on the next {app.current().name} run after expiry",
