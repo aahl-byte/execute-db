@@ -209,6 +209,12 @@ def run(argv: list):
     parser = build_parser(envs)
     args = parser.parse_args(argv)
 
+    # Resolving the URL stays OUTSIDE the try below: a store failure must fail
+    # on its own terms, not get relabelled "Query failed" -- and in system mode
+    # that label is all the caller would get. Most store errors exit via fail()
+    # -> SystemExit, which `except Exception` never catches anyway, so the
+    # boundary only bites for the paths that skip fail() (read_bytes raising
+    # OSError, say). commands/schema.py makes the same split for the same reason.
     if args.token:
         database_url = tokens.load_database_url_from_token(args.token)
     else:

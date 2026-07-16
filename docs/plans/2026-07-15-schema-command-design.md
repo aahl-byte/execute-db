@@ -59,7 +59,7 @@ Payload size by variant:
 
 9. **Introspection always opens a read-only transaction, even under `execute-db`.** `core/query.py` currently takes this from the `AppSpec`; introspection has no reason to ever write, so it should be structurally incapable of it rather than trusting a flag.
 
-10. **Partition children would be excluded if any existed.** The dev database has none, so this is not implemented — noted only because the first payload estimate assumed a partition explosion and was wrong. If a future database has partitions, auto-complete wants `events`, not `events_2024_03`.
+10. **Partition children are excluded.** ~~Not implemented — the dev database has none.~~ **Superseded during implementation:** the shipped query carries `AND NOT c.relispartition` (`db_core/core/schema.py`). It is inert against the dev database, which still has zero partitions, but it is cheap and correct-by-construction rather than a guard someone has to remember later. Noted originally because the first payload estimate assumed a partition explosion and was wrong; auto-complete wants `events`, not `events_2024_03`.
 
 11. **Extension-owned functions are excluded** via `pg_depend deptype='e'`. Installing PostGIS would otherwise add thousands of functions nobody is completing against.
 

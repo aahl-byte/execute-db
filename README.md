@@ -80,7 +80,7 @@ Each environment is one `~/.execute-db/.env.<name>` file — encrypted, or plain
 DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
-The URL is only ever entered at the `config set` prompt (never as a command-line argument, where it would leak via shell history, `/proc`, and sudo logs). Names must match `[A-Za-z][A-Za-z0-9_-]*`; reserved names (`token`, `config`, `file`, `f`, `sql`, `help`, `password`) are rejected.
+The URL is only ever entered at the `config set` prompt (never as a command-line argument, where it would leak via shell history, `/proc`, and sudo logs). Names must match `[A-Za-z][A-Za-z0-9_-]*`; reserved names (`token`, `config`, `schema`, `file`, `f`, `sql`, `help`, `password`) are rejected.
 
 ### Managing environments
 
@@ -165,7 +165,7 @@ Introspection **always runs in a read-only transaction**, even under `execute-db
 
 ### The cache
 
-A schema only moves when someone migrates it, and re-introspecting costs seconds, so the result is cached. On the database above a cold run takes about 3s and a cache hit about 0.01s: what's cached is the exact bytes Postgres returned, so a hit is a copy to stdout with no parse and no re-serialize on the way through.
+A schema only moves when someone migrates it, and re-introspecting costs seconds, so the result is cached. On the database above a cold run takes about 3s and a cache hit about 0.2s: what's cached is the exact bytes Postgres returned, so a hit is a copy to stdout with no parse and no re-serialize on the way through.
 
 By default a cached copy is served when it is younger than **15 minutes**; `--max-age` moves that bound, and `--refresh` ignores the cache outright:
 
