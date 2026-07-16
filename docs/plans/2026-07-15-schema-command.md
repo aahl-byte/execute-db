@@ -1419,13 +1419,33 @@ git commit -m "docs: document the schema command"
 
 ## Definition of done
 
-- [ ] `python -m pytest tests/ -v` passes; integration tests skip cleanly without `EXECUTE_DB_TEST_URL`.
-- [ ] `EXECUTE_DB_TEST_URL=... python -m pytest tests/test_schema_integration.py` passes against a real database.
-- [ ] `explore-db schema --dev` emits ~11MB of valid JSON in ~2-4s; a second call serves from cache in well under a second.
-- [ ] `execute-db schema --dev` works identically and still connects read-only.
-- [ ] Nothing but JSON on stdout — `explore-db schema --dev | python -m json.tool > /dev/null` succeeds.
-- [ ] `config rm` clears the cache.
-- [ ] README documents the command.
+- [x] `python -m pytest tests/ -v` passes; integration tests skip cleanly without `EXECUTE_DB_TEST_URL`. **159 passed, 9 skipped.**
+- [ ] `EXECUTE_DB_TEST_URL=... python -m pytest tests/test_schema_integration.py` passes against a real database. **Still unrun** — the dev URL lives in the service user's store and is unreadable from a user account by design, so this needs a plain (non-hardened) install or a throwaway database. The SQL itself is no longer unproven, though: it now runs end-to-end through the real command (below).
+- [x] `explore-db schema --dev` emits ~11MB of valid JSON in ~2-4s; a second call serves from cache in well under a second. **11,693,914 bytes; cold 3.5s; warm 0.193s, byte-identical.**
+- [x] `execute-db schema --dev` works identically and still connects read-only. **Its `dev` env is encrypted, so it correctly fails on its own terms with the token hint rather than a relabelled introspection error.**
+- [x] Nothing but JSON on stdout — `explore-db schema --dev | python -m json.tool > /dev/null` succeeds.
+- [x] `config rm` clears the cache.
+- [x] README documents the command.
+
+## Task 12: measured end-to-end (2026-07-16, v0.4.0 / explore-db 0.2.0)
+
+The first run of the **real** path: launcher → `exploredb` service user → psycopg2 → cache → stdout. Everything before this drove the Python directly or routed the raw SQL through the old CLI.
+
+| check | result |
+| --- | --- |
+| cold | `refreshed in 3.5s`, **11,693,914 bytes** |
+| warm | `cached (age 12s)`, **0.193s**, byte-identical (`cmp`) |
+| content | PG **17.9**, 2,128 tables, 31,619 columns, 534 FKs with structured `references`, 14 enums, 535 functions, 36 schemas |
+| `--refresh` / `--max-age 0` | both re-introspect (3.0s / 2.9s) |
+| `--max-age 2h` | serves the cache |
+| `\| head` | `explore-db: [Errno 32] Broken pipe` — one line, no traceback |
+| `> /dev/full` | `explore-db: [Errno 28] No space left on device`, **exit 1**, generic (not write-specific) |
+| `--token` | **`cached (age 36s)`** — the token hit the entry `--dev` created, confirming URL-hash keying live |
+| encrypted env | actionable message + token hint, not a relabelled introspection failure |
+| `--max-age soon` | rejected before any credential access — no password prompt |
+| cache file | unreadable to the calling user (service-user store): stdout is the interface, not the file |
+
+The document is slightly larger than the design's 11.7 MB / 2,127 relations because `dev` is live and has gained a table since.
 
 ---
 
