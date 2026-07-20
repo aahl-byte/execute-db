@@ -19,6 +19,7 @@ from .flags import add_env_flags, selected_env
 from .. import app
 from ..console import fail
 from ..core import query, store, tokens
+from ..core.split import split_statements
 from ..core.store import discover_envs
 from ..core.system import in_system_mode
 
@@ -69,6 +70,10 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
     parser.add_argument("--no-pager", dest="pager", action="store_false",
                         help="print table/vertical output straight to stdout instead "
                              "of paging it through $PAGER at a terminal")
+    parser.add_argument("--multi", action="store_true",
+                        help="split the SQL into its statements and show every "
+                             "statement's result (same single transaction; "
+                             "-o csv/list are not supported — use json or jsonl)")
     return parser
 
 
@@ -201,6 +206,56 @@ def _print_result(result: query.QueryResult, fmt: str = "table",
         print("Statement executed.", file=sys.stderr)
 
 
+def _statement_obj(r: query.StatementResult) -> dict:
+    """One statement as a JSON-able object for the --multi envelope."""
+    obj = {"statement": r.index, "preview": r.preview, "kind": r.result.kind}
+    if r.result.kind == "rows":
+        obj["columns"] = r.result.columns
+        obj["rows"] = [dict(zip(r.result.columns, row)) for row in r.result.rows]
+    elif r.result.kind == "count":
+        obj["rowcount"] = r.result.rowcount
+    return obj
+
+
+def _print_multi(results: list, fmt: str = "table",
+                 meta: bool = False, pager: bool = True):
+    """Render every statement's result (--multi).
+
+    json/jsonl put EVERYTHING (including count/ok statements) on stdout so a
+    machine consumer never has to parse stderr; the shape follows the flag,
+    not the statement count. Human formats keep the stdout=data/stderr=status
+    split: row sets as headed blocks, everything else as numbered stderr lines.
+    """
+    if fmt == "json":
+        print(json.dumps([_statement_obj(r) for r in results],
+                         indent=2, default=str))
+        return
+    if fmt == "jsonl":
+        for r in results:
+            print(json.dumps(_statement_obj(r), default=str))
+        return
+
+    blocks = []
+    for r in results:
+        q = r.result
+        if q.kind == "rows":
+            data = format_result(q, fmt)
+            block = f"-- statement {r.index} --"
+            if data:
+                block += "\n" + data
+            blocks.append(block)
+            if meta:
+                n = len(q.rows)
+                print(f"[{r.index}] {n} row{'' if n == 1 else 's'}, "
+                      f"columns: {', '.join(q.columns)}", file=sys.stderr)
+        elif q.kind == "count":
+            print(f"[{r.index}] Rows affected: {q.rowcount}", file=sys.stderr)
+        else:
+            print(f"[{r.index}] Statement executed.", file=sys.stderr)
+    if blocks:
+        _emit("\n\n".join(blocks), use_pager=pager and fmt in HUMAN_FORMATS)
+
+
 def run(argv: list):
     envs = discover_envs()
     if not envs:
@@ -208,6 +263,11 @@ def run(argv: list):
              f"`{app.current().name} config set <name>`.")
     parser = build_parser(envs)
     args = parser.parse_args(argv)
+
+    if args.multi and args.format in ("csv", "list"):
+        parser.error(f"--multi cannot render multiple result sets as "
+                     f"{args.format}; use -o json or -o jsonl (or drop --multi "
+                     "for the last statement's result only)")
 
     # Resolving the URL stays OUTSIDE the try below: a store failure must fail
     # on its own terms, not get relabelled "Query failed" -- and in system mode
@@ -236,18 +296,39 @@ def run(argv: list):
     else:
         parser.error("provide SQL as an argument, via -f FILE, or pipe to stdin")
 
+    # Counting is not splitting: without --multi the ORIGINAL string still goes
+    # to a single execute(), so the lexer can hint but never corrupt.
+    n_statements = len(split_statements(sql))
+
     try:
-        _print_result(query.run_query(database_url, sql),
-                      args.format, args.meta, args.pager)
+        if args.multi:
+            _print_multi(query.run_multi(database_url, sql),
+                         args.format, args.meta, args.pager)
+        else:
+            _print_result(query.run_query(database_url, sql),
+                          args.format, args.meta, args.pager)
+            if n_statements > 1:
+                print(f"note: {n_statements} statements ran in one transaction; "
+                      "only the last result is shown.\n"
+                      "      Re-run with --multi to see each statement's result.",
+                      file=sys.stderr)
     except Exception as e:
         # Over sudo the caller may be an agent, and a psycopg2 CONNECTION error
         # can echo host/user/dbname — so that detail stays withheld. But a
         # SERVER-side error (one with a SQLSTATE) only ever describes the
         # caller's own SQL, and withholding *that* made the tool unusable for
         # the one thing it exists to do: fix your query. See query.server_error
-        # for exactly where the line falls.
+        # for exactly where the line falls. A StatementError's own text names
+        # only a position in the caller's input, so it survives both modes.
+        position = f": {e}" if isinstance(e, query.StatementError) else ""
         if in_system_mode():
             detail = query.server_error(e)
-            fail(f"Query failed: {detail}" if detail else "Query failed")
-        print(f"Query failed: {e}", file=sys.stderr)
+            fail(f"Query failed{position}: {detail}" if detail
+                 else f"Query failed{position}")
+        if position:
+            cause = e.__cause__ or e.__context__
+            detail = f": {cause}" if cause else ""
+            print(f"Query failed{position}{detail}", file=sys.stderr)
+        else:
+            print(f"Query failed: {e}", file=sys.stderr)
         sys.exit(1)
