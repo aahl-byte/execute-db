@@ -9,11 +9,13 @@ children:
   - ERROR_DISCLOSURE.md
   - EPHEMERAL_TOKENS.md
   - SCHEMA_INTROSPECTION.md
+  - SQL_EXECUTION.md
 sources:
   - db_core/app.py
   - db_core/cli.py
   - db_core/console.py
   - db_core/core/query.py
+  - db_core/core/split.py
   - execute_db/cli.py
   - explore_db/cli.py
   - pyproject.toml
@@ -62,7 +64,7 @@ Why the split earns its keep here specifically: the security-critical decisions 
 
 | Command | Owns | Spec |
 | --- | --- | --- |
-| *(default)* | run SQL, format results | — |
+| *(default)* | run SQL (single or `--multi`), format results | `SQL_EXECUTION.md` |
 | `config` | create/list/remove environments | `CREDENTIAL_STORE.md` |
 | `password` | encrypt/rotate an environment's password | `CREDENTIAL_STORE.md` |
 | `token` | mint/list/revoke ephemeral access | `EPHEMERAL_TOKENS.md` |

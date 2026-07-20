@@ -17,6 +17,8 @@ sources:
   - db_core/commands/exec.py
   - db_core/commands/schema.py
   - tests/test_error_disclosure.py
+  - tests/test_multi.py
+  - tests/test_multi_output.py
 tags: [security, errors, disclosure, sudo]
 ---
 
@@ -70,8 +72,8 @@ bugs must not become a disclosure channel.
 
 This is the part that looks like over-engineering and is not.
 
-Both callers — `core/query.py:run_query` and `core/schema.py:introspect` — end
-their transaction in an `except`/`finally`. So when the server terminates a
+All three callers — `core/query.py:run_query`, `run_multi`, and
+`core/schema.py:introspect` — end their transaction in an `except`/`finally`. So when the server terminates a
 backend, the process raises **twice**: the real `OperationalError` from
 `execute()`, then an `InterfaceError` from the `rollback()` that tried to tidy up
 after it. The **second** propagates, and it has no SQLSTATE. A naive
@@ -89,7 +91,11 @@ So `server_error` walks the chain. Two properties keep that honest:
   underneath must never replace it.
 
 `__context__` and not `__cause__`: implicit chaining is what a raising
-`except`/`finally` produces, and nothing in this codebase raises `from`.
+`except`/`finally` produces. The one place that does raise `from` —
+`run_multi` wrapping a driver error in `StatementError` — does so inside an
+`except` block, where Python sets `__context__` *as well as* `__cause__`, so
+the walk finds the driver error without ever reading `__cause__`. Pinned by
+`tests/test_multi.py::test_server_error_reads_through_a_statement_error`.
 
 ## The evidence that a connection error cannot slip through
 
@@ -128,6 +134,16 @@ In the **command layer**, not in `core`. `commands/exec.py:run()` and
 `core` stays a pure decision (`server_error` returns a string or `None`); the
 command layer decides whether the boundary applies. A third command adding this
 split should copy the shape, not re-derive the rule.
+
+**The `--multi` position is disclosed in both modes.** A failing `--multi` run
+reports `statement N of M failed` even under hardening, because N and M derive
+from nothing but the caller's own input — there is no boundary they could
+cross. Only the *underlying* error text faces the predicate, exactly as above.
+The wrapper (`query.StatementError`) deliberately does not bake the cause into
+its own message: `str(exc)` of the wrapper must stay safe on its own, so the
+gate remains the only path by which driver words reach the terminal. Pinned by
+`tests/test_multi_output.py` (both the disclosed-position and withheld-
+connection-text cases).
 
 ## Gotchas for future commands
 
