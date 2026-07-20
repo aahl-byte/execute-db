@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import psycopg2
 
 from .. import app
+from .split import split_statements
 
 
 @dataclass
@@ -21,6 +22,32 @@ class QueryResult:
     columns: list = None
     rows: list = None
     rowcount: int = None
+
+
+@dataclass
+class StatementResult:
+    """One statement's outcome under --multi.
+
+    `preview` is the statement's own first line (truncated) — the caller wrote
+    it, so echoing it back discloses nothing.
+    """
+    index: int          # 1-based position among the executed statements
+    preview: str
+    result: QueryResult
+
+
+class StatementError(Exception):
+    """Statement `index` of `total` failed; the driver's error is __cause__.
+
+    index/total derive only from the caller's own input, so str(self) is safe
+    to disclose even in system mode. The cause is NOT baked into the message:
+    the command layer routes it through `server_error`, same as ever.
+    """
+
+    def __init__(self, index: int, total: int):
+        super().__init__(f"statement {index} of {total} failed")
+        self.index = index
+        self.total = total
 
 
 def _connect(database_url: str):
@@ -53,6 +80,39 @@ def run_query(database_url: str, sql: str) -> QueryResult:
             result = _classify(cur)
         conn.commit()
         return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _preview(stmt: str, limit: int = 80) -> str:
+    line = stmt.splitlines()[0] if stmt else ""
+    return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+def run_multi(database_url: str, sql: str) -> "list[StatementResult]":
+    """Split `sql` and run each statement on one cursor in one transaction.
+
+    Same atomicity as run_query — commit once at the end, roll everything back
+    on any failure. Embedded BEGIN/COMMIT are executed as-is: the server
+    enforces their semantics, exactly as it does under single-execute.
+    """
+    statements = split_statements(sql)
+    conn = _connect(database_url)
+    try:
+        results = []
+        with conn.cursor() as cur:
+            for index, stmt in enumerate(statements, 1):
+                try:
+                    cur.execute(stmt)
+                except Exception as e:
+                    raise StatementError(index, len(statements)) from e
+                results.append(
+                    StatementResult(index, _preview(stmt), _classify(cur)))
+        conn.commit()
+        return results
     except Exception:
         conn.rollback()
         raise
