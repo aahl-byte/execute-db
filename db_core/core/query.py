@@ -23,7 +23,7 @@ class QueryResult:
     rowcount: int = None
 
 
-def run_query(database_url: str, sql: str) -> QueryResult:
+def _connect(database_url: str):
     # In read-only apps (explore-db) the server itself rejects any write: a
     # read-only transaction fails on INSERT/UPDATE/DELETE/DDL, so the guarantee
     # does not depend on parsing the SQL. Committing a read-only transaction is
@@ -31,20 +31,26 @@ def run_query(database_url: str, sql: str) -> QueryResult:
     connect_kwargs = {"sslmode": "require"}
     if app.current().read_only:
         connect_kwargs["options"] = "-c default_transaction_read_only=on"
-    conn = psycopg2.connect(database_url, **connect_kwargs)
+    return psycopg2.connect(database_url, **connect_kwargs)
+
+
+def _classify(cur) -> QueryResult:
+    """What one just-executed statement produced, read off the cursor."""
+    if cur.description is not None:
+        columns = [desc[0] for desc in cur.description]
+        return QueryResult("rows", columns=columns, rows=cur.fetchall())
+    if cur.rowcount >= 0:
+        return QueryResult("count", rowcount=cur.rowcount)
+    # rowcount is -1 when undefined (e.g. DDL such as CREATE/ALTER).
+    return QueryResult("ok")
+
+
+def run_query(database_url: str, sql: str) -> QueryResult:
+    conn = _connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
-
-            if cur.description is not None:
-                columns = [desc[0] for desc in cur.description]
-                result = QueryResult("rows", columns=columns, rows=cur.fetchall())
-            elif cur.rowcount >= 0:
-                result = QueryResult("count", rowcount=cur.rowcount)
-            else:
-                # rowcount is -1 when undefined (e.g. DDL such as CREATE/ALTER).
-                result = QueryResult("ok")
-
+            result = _classify(cur)
         conn.commit()
         return result
     except Exception:
