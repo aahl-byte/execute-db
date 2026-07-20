@@ -147,6 +147,19 @@ Writes with no result set (`INSERT`/`UPDATE`/`DELETE`/DDL) print their outcome t
 Rows affected: 1
 ```
 
+### Multi-statement scripts (`--multi`)
+
+A script with several statements (`BEGIN; UPDATE ...; SELECT ...; COMMIT;`) runs fine without any flag, but the wire protocol only reports the **last** statement's result — so a migration appears to print nothing. Pass `--multi` and the script is split client-side (a real lexer: dollar-quoted function bodies, comments, and `;` inside strings are all handled) with every statement still in the **same single transaction**, and each statement's result is shown:
+
+```bash
+execute-db --dev --multi -f migration.sql            # headed blocks per SELECT
+execute-db --dev --multi -o json -f migration.sql    # one object per statement
+```
+
+Under `-o json`/`-o jsonl` every statement appears — `{"statement": 2, "kind": "rows", ...}` — so a script can assert what ran without parsing stderr. `-o csv`/`-o list` cannot express multiple result sets and are rejected under `--multi`; without `--multi` they still export the script's final statement, unchanged. On failure everything rolls back and the error names the position: `statement 3 of 7 failed: ...`.
+
+`explore-db` supports `--multi` identically (still read-only, enforced by the server per statement).
+
 ## Schema introspection
 
 `schema` prints a complete, machine-readable description of an environment's schema as one JSON document:

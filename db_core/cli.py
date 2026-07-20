@@ -31,6 +31,7 @@ Run SQL against an environment (each configured env is an --<env> flag):
   {name} --dev -f query.sql        ...or read it from a .sql file
   {name} --dev < query.sql         ...or pipe it on stdin
   {name} --dev -o csv "TABLE t"    pick an output format (see below)
+  {name} --dev --multi -f mig.sql  show EVERY statement's result, not just the last
   {name} --token <TOKEN> "..."     use an ephemeral token instead of --<env>
   {txn_note}
   Encrypted envs prompt for a password; use a token for unattended access.

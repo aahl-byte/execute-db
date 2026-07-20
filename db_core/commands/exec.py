@@ -46,6 +46,7 @@ def build_parser(envs: list) -> argparse.ArgumentParser:
         epilog='examples:\n'
                f'  {name} --dev "SELECT * FROM users LIMIT 5"\n'
                f'  {name} --dev -f query.sql                run SQL from a file\n'
+               f'  {name} --dev --multi -f migration.sql    show every statement\'s result\n'
                f'  {name} --dev < query.sql                 same, via stdin\n'
                f'  {name} --prod -o csv "TABLE users" > out.csv export to CSV\n'
                f'  {name} --token <TOKEN> "SELECT 1"            use an ephemeral token',
